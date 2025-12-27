@@ -1,0 +1,37 @@
+assets:
+  - name: cross_ref_test_asset
+    description: "Cross-reference test asset"
+    group: testing
+    partitions_def: &daily_sales_partition
+      type: daily
+      start_date: "2025-01-01"
+      hour_offset: 5
+      minute_offset: 6
+    source:
+      type: SFTP
+      connection: sftp_prod
+      configs:
+        path: "/home/ukatru/data"
+        # Match multiple files
+        pattern: ".*\\.csv"
+    target:
+      type: S3
+      connection: s3_prod
+      configs:
+        bucket_name: "my-dagster-poc"
+        # Mix of cross-config (source.path) and runtime (item.file_name)
+        key: "backups{{ source.path }}/{{ source.item.file_name }}"
+    checks:
+      - name: audit_file_count
+        type: observation_diff
+        source_key: "files_scanned"
+        target_key: "files_uploaded"
+        threshold: 0
+jobs:
+  - name: cross_ref_test_job
+    selection: ["cross_ref_test_asset"]
+
+schedules:
+  - name: daily_cross_ref_schedule
+    job: cross_ref_test_job
+

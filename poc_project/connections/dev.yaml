@@ -1,0 +1,62 @@
+resources:
+  sqlserver_prod:
+    type: SQLServerResource
+    config:
+      host: "winnuc002"
+      database: "DG_PLAY"
+      user: "sa"
+      password: "{{env.SQL_PASSWORD}}"
+
+  sqlserver_conn:
+    type: SQLServerResource
+    config:
+      host: "winnuc002"
+      database: "DG_PLAY"
+      user: "sa"
+      password: "{{env.SQL_PASSWORD}}"
+
+  s3_prod:
+    type: S3Resource
+    config:
+      #bucket_name: "my-dagster-poc"
+      region_name: "us-west-2"
+      # Auth Options:
+      # 1. Explicit Keys (Local Dev)
+      access_key: "{{env.AWS_ACCESS_KEY_ID}}"
+      secret_key: "{{env.AWS_SECRET_ACCESS_KEY}}"
+      endpoint_url: "http://localhost:9000"
+      
+      # 2. IRSA / Web Identity (EKS)
+      # No extra config needed if AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE env vars are set by Kubernetes.
+      # You can also explicitly specify:
+      # assume_role_arn: "arn:aws:iam::123456789012:role/my-role"
+
+  sftp_prod:
+    type: SFTPResource
+    config:
+      host: "{{env.SFTP_HOST}}"
+      port: 22
+      username: "{{env.SFTP_USERNAME}}"
+      password: "{{env.SFTP_PASSWORD}}"
+
+  snowflake_prod:
+    type: SnowflakeResource
+    config:
+      account: "{{env.SNOWFLAKE_ACCOUNT}}"
+      user: "{{env.SNOWFLAKE_USER}}"
+      password: "{{env.SNOWFLAKE_PASSWORD}}"
+      database: "{{env.SNOWFLAKE_DATABASE}}"
+      schema: "{{env.SNOWFLAKE_SCHEMA}}"
+      warehouse: "{{env.SNOWFLAKE_WAREHOUSE}}"
+      role: "{{env.SNOWFLAKE_ROLE}}"
+  
+  snowflake_conn:
+    type: SnowflakeResource
+    config:
+      account: "{{env.SNOWFLAKE_ACCOUNT}}"
+      user: "{{env.SNOWFLAKE_USER}}"
+      password: "{{env.SNOWFLAKE_PASSWORD}}"
+      database: "{{env.SNOWFLAKE_DATABASE}}"
+      schema: "{{env.SNOWFLAKE_SCHEMA}}"
+      warehouse: "{{env.SNOWFLAKE_WAREHOUSE}}"
+      role: "{{env.SNOWFLAKE_ROLE}}"
