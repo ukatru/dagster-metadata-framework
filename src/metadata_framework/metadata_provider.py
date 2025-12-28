@@ -66,18 +66,8 @@ class MetadataProvider:
                 job_id, final_job_nm, src_conn, tgt_conn = job_row
                 metadata["_job_id"] = job_id
                 metadata["_job_nm"] = final_job_nm
-
-                # 3. Fetch Connection Configs
-                for conn_nm in filter(None, [src_conn, tgt_conn]):
-                    cur.execute("""
-                        SELECT c.config_json 
-                        FROM etl_connection_config c
-                        JOIN etl_connection r ON c.etl_connection_id = r.id
-                        WHERE r.conn_nm = %s
-                    """, (conn_nm,))
-                    config_row = cur.fetchone()
-                    if config_row:
-                        metadata.update(config_row[0])
+                metadata["source_conn_nm"] = src_conn
+                metadata["target_conn_nm"] = tgt_conn
 
                 # 4. Fetch Job Specific Parameters (Highest Priority)
                 cur.execute("SELECT config_json FROM etl_job_parameter WHERE etl_job_id = %s", (job_id,))

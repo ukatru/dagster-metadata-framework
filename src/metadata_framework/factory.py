@@ -23,7 +23,8 @@ class MetadataAssetFactory(AssetFactory):
         is_generic_job = job_nm == "__ASSET_JOB" or not job_nm
 
         if invok_id:
-            context.log.info(f"🔍 Hydrating metadata for Job: {job_nm}, Invok: {invok_id}")
+            source = "tags" if "job_nm" in run_tags else "context"
+            context.log.info(f"🔍 Hydrating metadata for Invok: {invok_id} (Job: {job_nm} from {source})")
             provider = MetadataProvider(self.base_dir)
             
             # If job_nm is still generic, the provider can try a fuzzy lookup or invok_id only

@@ -47,9 +47,10 @@ def init_db():
 
     # 1. DROP (For Clean POC)
     cur.execute("DROP TABLE IF EXISTS etl_job_parameter CASCADE;")
-    cur.execute("DROP TABLE IF EXISTS etl_connection_config CASCADE;")
     cur.execute("DROP TABLE IF EXISTS etl_job CASCADE;")
     cur.execute("DROP TABLE IF EXISTS etl_connection CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS etl_asset_status CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS etl_job_status CASCADE;")
     cur.execute("DROP TABLE IF EXISTS etl_parameter CASCADE;")
 
     # 2. CREATE
@@ -59,15 +60,6 @@ def init_db():
             conn_nm VARCHAR(255) UNIQUE NOT NULL,
             conn_type VARCHAR(50) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-
-    cur.execute("""
-        CREATE TABLE etl_connection_config (
-            id SERIAL PRIMARY KEY,
-            etl_connection_id INTEGER UNIQUE REFERENCES etl_connection(id) ON DELETE CASCADE,
-            config_json JSONB NOT NULL DEFAULT '{}',
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
 
@@ -103,20 +95,44 @@ def init_db():
         );
     """)
 
+    cur.execute("""
+        CREATE TABLE etl_job_status (
+            btch_nbr BIGSERIAL PRIMARY KEY,
+            run_id VARCHAR(64) UNIQUE NOT NULL,
+            job_nm VARCHAR(256) NOT NULL,
+            invok_id VARCHAR(10),
+            strt_dttm TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            end_dttm TIMESTAMP,
+            btch_sts_cd CHAR(1) DEFAULT 'R',
+            run_mde_txt VARCHAR(10) NOT NULL,
+            updt_by_nm VARCHAR(30),
+            updt_dttm TIMESTAMP,
+            creat_by_nm VARCHAR(30) DEFAULT 'DAGSTER',
+            creat_dttm TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+    cur.execute("""
+        CREATE TABLE etl_asset_status (
+            id BIGSERIAL PRIMARY KEY,
+            btch_nbr BIGINT REFERENCES etl_job_status(btch_nbr) ON DELETE CASCADE,
+            asset_nm VARCHAR(256) NOT NULL,
+            strt_dttm TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            end_dttm TIMESTAMP,
+            asset_sts_cd CHAR(1) DEFAULT 'R',
+            err_msg_txt TEXT,
+            creat_dttm TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
     print("✅ Tables created. Seeding data for 'cross_ref_test_job'...")
 
     # 3. SEED CONNECTIONS
     # SFTP PROD
-    cur.execute("INSERT INTO etl_connection (conn_nm, conn_type) VALUES (%s, %s) RETURNING id;", ("sftp_prod", "SFTP"))
-    sftp_id = cur.fetchone()[0]
-    cur.execute("INSERT INTO etl_connection_config (etl_connection_id, config_json) VALUES (%s, %s);", 
-                (sftp_id, Json({"port": 22})))
+    cur.execute("INSERT INTO etl_connection (conn_nm, conn_type) VALUES (%s, %s);", ("sftp_prod", "SFTP"))
 
     # S3 PROD
-    cur.execute("INSERT INTO etl_connection (conn_nm, conn_type) VALUES (%s, %s) RETURNING id;", ("s3_prod", "S3"))
-    s3_id = cur.fetchone()[0]
-    cur.execute("INSERT INTO etl_connection_config (etl_connection_id, config_json) VALUES (%s, %s);", 
-                (s3_id, Json({"region_name": "us-west-2", "endpoint_url": "http://localhost:9000"})))
+    cur.execute("INSERT INTO etl_connection (conn_nm, conn_type) VALUES (%s, %s);", ("s3_prod", "S3"))
 
     # 4. SEED JOB (cross_ref_test_job for a test invoice)
     # Note: We use the JOB_NM from the YAML
