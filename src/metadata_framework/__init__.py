@@ -1,4 +1,4 @@
-from .factory import MetadataDagsterFactory
-from .metadata_provider import MetadataProvider
+from .factory import ParamsDagsterFactory
+from .metadata_provider import JobParamsProvider
 
-__all__ = ["MetadataDagsterFactory", "MetadataProvider"]
+__all__ = ["ParamsDagsterFactory", "JobParamsProvider"]

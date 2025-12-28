@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
-class MetadataProvider:
+class JobParamsProvider:
     def __init__(self, base_dir: Optional[Path] = None):
         # Load environment variables if base_dir is provided
         if base_dir:
@@ -25,12 +25,12 @@ class MetadataProvider:
             raise ValueError("POSTGRES_PASSWORD is not set in environment")
         return psycopg2.connect(**self.db_params)
 
-    def get_job_metadata(self, job_nm: str, invok_id: str) -> Dict[str, Any]:
+    def get_job_params(self, job_nm: str, invok_id: str) -> Dict[str, Any]:
         """
-        Fetches and merges metadata.
+        Fetches and merges job parameters.
         Priority: Global -> Connection -> Job
         """
-        metadata = {}
+        params = {}
         # 🟢 Internal logic: If job_nm is generic, we fall back to invok_id only lookup.
         # But if job_nm is specific, we MUST match both.
         is_generic = job_nm == "__ASSET_JOB" or not job_nm
@@ -41,7 +41,7 @@ class MetadataProvider:
                 # 1. Global
                 cur.execute("SELECT parm_nm, parm_value FROM etl_parameter")
                 for nm, val in cur.fetchall():
-                    metadata[nm] = val
+                    params[nm] = val
 
                 # 2. Job + ID
                 if is_generic:
@@ -60,25 +60,25 @@ class MetadataProvider:
                 
                 job_row = cur.fetchone()
                 if not job_row:
-                    return metadata
+                    return params
 
-                # We include the internal ID and Job Name in the metadata for traceability
+                # We include the internal ID and Job Name in the parameters for traceability
                 job_id, final_job_nm, src_conn, tgt_conn = job_row
-                metadata["_job_id"] = job_id
-                metadata["_job_nm"] = final_job_nm
-                metadata["source_conn_nm"] = src_conn
-                metadata["target_conn_nm"] = tgt_conn
+                params["_job_id"] = job_id
+                params["_job_nm"] = final_job_nm
+                params["source_conn_nm"] = src_conn
+                params["target_conn_nm"] = tgt_conn
 
                 # 4. Fetch Job Specific Parameters (Highest Priority)
                 cur.execute("SELECT config_json FROM etl_job_parameter WHERE etl_job_id = %s", (job_id,))
                 job_param_row = cur.fetchone()
                 if job_param_row:
-                    metadata.update(job_param_row[0])
+                    params.update(job_param_row[0])
 
         finally:
             conn.close()
 
-        return metadata
+        return params
 
     def get_active_schedules(self) -> list[Dict[str, Any]]:
         """

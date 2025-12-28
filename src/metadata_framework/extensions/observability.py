@@ -150,7 +150,7 @@ class NexusObservability:
             # We prioritize specific keys to avoid bloat
             pruned_tpl_vars = {}
             if isinstance(template_vars, dict):
-                for k in ["vars", "run_tags", "metadata", "partition_key", "trigger"]:
+                for k in ["vars", "run_tags", "params", "partition_key", "trigger"]:
                     if k in template_vars:
                         pruned_tpl_vars[k] = to_json_serializable(template_vars[k])
 

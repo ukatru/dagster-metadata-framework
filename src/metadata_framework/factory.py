@@ -2,9 +2,9 @@ from typing import Dict, Any
 from pathlib import Path
 from dagster_dag_factory.factory.asset_factory import AssetFactory
 from dagster_dag_factory.factory.dagster_factory import DagsterFactory
-from .metadata_provider import MetadataProvider
+from .metadata_provider import JobParamsProvider
 
-class MetadataAssetFactory(AssetFactory):
+class ParamsAssetFactory(AssetFactory):
     def _get_template_vars(self, context) -> Dict[str, Any]:
         # 🟢 Get base vars (partitions, env, etc) from core library
         template_vars = super()._get_template_vars(context)
@@ -22,16 +22,16 @@ class MetadataAssetFactory(AssetFactory):
         # If we didn't find a 'job_nm' tag, we will have to use the invok_id lookup.
         
         if invok_id:
-            context.log.info(f"🔍 Hydrating metadata for Invok: {invok_id} (Job: {job_nm})")
-            provider = MetadataProvider(self.base_dir)
-            metadata = provider.get_job_metadata(job_nm, invok_id)
+            context.log.info(f"🔍 Loading parameters for Invok: {invok_id} (Job: {job_nm})")
+            provider = JobParamsProvider(self.base_dir)
+            params = provider.get_job_params(job_nm, invok_id)
             
-            if not metadata:
-                context.log.error(f"❌ No metadata found in DB for job={job_nm}, invok={invok_id}.")
+            if not params:
+                context.log.error(f"❌ No parameters found in DB for job={job_nm}, invok={invok_id}.")
             else:
-                context.log.info(f"✅ Hydrated {len(metadata)} metadata parameters.")
+                context.log.info(f"✅ Successfully loaded {len(params)} parameters into run context.")
             
-            template_vars["metadata"] = metadata
+            template_vars["params"] = params
         
         return template_vars
 
@@ -55,29 +55,28 @@ from dagster import (
     build_schedule_from_partitioned_job
 )
 
-class MetadataDagsterFactory(DagsterFactory):
+class ParamsDagsterFactory(DagsterFactory):
     def __init__(self, base_dir: Path, **kwargs):
         super().__init__(base_dir, **kwargs)
-        # Swap the standard AssetFactory with our Metadata-aware version
-        # This is where the 'magic' happens without touching core lib
-        self.asset_factory = MetadataAssetFactory(self.base_dir)
+        # Swap the standard AssetFactory with our Params-aware version
+        self.asset_factory = ParamsAssetFactory(self.base_dir)
 
     def build_definitions(self) -> Definitions:
         # 1. Build standard definitions from YAML
         defs = super().build_definitions()
         
         # 2. Fetch Dynamic Schedules
-        provider = MetadataProvider(self.base_dir)
+        provider = JobParamsProvider(self.base_dir)
         try:
-            metadata_schedules = provider.get_active_schedules()
+            params_schedules = provider.get_active_schedules()
         except Exception as e:
             print(f"⚠️ Warning: Failed to fetch dynamic schedules: {e}")
-            metadata_schedules = []
+            params_schedules = []
         
         jobs_map = {job.name: job for job in defs.jobs}
         
         dynamic_schedules = []
-        for sched in metadata_schedules:
+        for sched in params_schedules:
             job_nm = sched['job_nm']
             invok_id = sched['invok_id']
             cron = sched['cron_schedule']
