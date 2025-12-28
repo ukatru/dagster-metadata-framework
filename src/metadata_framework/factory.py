@@ -6,7 +6,7 @@ from .metadata_provider import MetadataProvider
 
 class MetadataAssetFactory(AssetFactory):
     def _get_template_vars(self, context) -> Dict[str, Any]:
-        # 1. Get base vars (partitions, env, etc) from core library
+        # 🟢 Get base vars (partitions, env, etc) from core library
         template_vars = super()._get_template_vars(context)
         
         # Extract context info
@@ -20,28 +20,32 @@ class MetadataAssetFactory(AssetFactory):
         
         # When materializing from the Asset UI, Dagster uses '__ASSET_JOB'.
         # If we didn't find a 'job_nm' tag, we will have to use the invok_id lookup.
-        is_generic_job = job_nm == "__ASSET_JOB" or not job_nm
-
+        
         if invok_id:
-            source = "tags" if "job_nm" in run_tags else "context"
-            context.log.info(f"🔍 Hydrating metadata for Invok: {invok_id} (Job: {job_nm} from {source})")
+            context.log.info(f"🔍 Hydrating metadata for Invok: {invok_id} (Job: {job_nm})")
             provider = MetadataProvider(self.base_dir)
-            
-            # If job_nm is still generic, the provider can try a fuzzy lookup or invok_id only
             metadata = provider.get_job_metadata(job_nm, invok_id)
             
             if not metadata:
-                context.log.error(f"❌ No metadata found in DB for job={job_nm}, invok={invok_id}. Check your DB seeding!")
+                context.log.error(f"❌ No metadata found in DB for job={job_nm}, invok={invok_id}.")
             else:
-                context.log.info(f"✅ Hydrated {len(metadata)} metadata parameters: {list(metadata.keys())}")
+                context.log.info(f"✅ Hydrated {len(metadata)} metadata parameters.")
             
-            # 3. Inject into Jinja scope as 'metadata'
             template_vars["metadata"] = metadata
-        else:
-            if not invok_id:
-                context.log.warning("⚠️ No 'invok_id' found in run tags. Skipping metadata hydration.")
-            
+        
         return template_vars
+
+    def _wrap_operator(self, operator: Any, asset_conf: Dict[str, Any]) -> Any:
+        """
+        Injects Nexus Observability into the operator execution.
+        Captures asset-level snapshots and configs.
+        """
+        from .extensions.observability import NexusObservability
+        obs = NexusObservability()
+        
+        asset_nm = asset_conf.get("name")
+        operator.execute = obs.wrap_operator_execute(asset_nm, operator.execute)
+        return operator
 
 from dagster import (
     AssetExecutionContext, 
@@ -59,21 +63,17 @@ class MetadataDagsterFactory(DagsterFactory):
         self.asset_factory = MetadataAssetFactory(self.base_dir)
 
     def build_definitions(self) -> Definitions:
-        # 1. Build standard definitions from YAML (Assets, Jobs, static Schedules)
+        # 1. Build standard definitions from YAML
         defs = super().build_definitions()
         
-        # 2. Fetch Dynamic Schedules from Postgres
+        # 2. Fetch Dynamic Schedules
         provider = MetadataProvider(self.base_dir)
         try:
             metadata_schedules = provider.get_active_schedules()
         except Exception as e:
-            print(f"⚠️ Warning: Failed to fetch dynamic schedules from metadata DB: {e}")
-            return defs
-
-        if not metadata_schedules:
-            return defs
-
-        # 3. Create Jobs map for schedule association
+            print(f"⚠️ Warning: Failed to fetch dynamic schedules: {e}")
+            metadata_schedules = []
+        
         jobs_map = {job.name: job for job in defs.jobs}
         
         dynamic_schedules = []
@@ -111,8 +111,14 @@ class MetadataDagsterFactory(DagsterFactory):
             else:
                 print(f"⚠️ Warning: Dynamic schedule found for unknown job '{job_nm}'. Skipping.")
 
-        # 4. Merge results
-        if dynamic_schedules:
-            return Definitions.merge(defs, Definitions(schedules=dynamic_schedules))
+        # 3. Inject Global Listeners
+        from .extensions.observability import nexus_listeners
         
-        return defs
+        # 4. Merge results
+        return Definitions.merge(
+            defs, 
+            Definitions(
+                schedules=dynamic_schedules,
+                sensors=nexus_listeners
+            )
+        )

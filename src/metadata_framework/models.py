@@ -54,11 +54,11 @@ class ETLJobStatus(Base):
     btch_nbr = Column(BigInteger, primary_key=True, autoincrement=True)
     run_id = Column(String(64), unique=True, nullable=False)
     job_nm = Column(String(256), nullable=False)
-    invok_id = Column(String(10))
+    invok_id = Column(String(255))
     strt_dttm = Column(DateTime, default=datetime.utcnow)
     end_dttm = Column(DateTime)
     btch_sts_cd = Column(CHAR(1), default='R') # R, C, A
-    run_mde_txt = Column(String(10), nullable=False) # SCHEDULED, MANUAL, BACKFILL
+    run_mde_txt = Column(String(50), nullable=False) # SCHEDULED, MANUAL, BACKFILL
     updt_by_nm = Column(String(30))
     updt_dttm = Column(DateTime, onupdate=datetime.utcnow)
     creat_by_nm = Column(String(30), default='DAGSTER')
