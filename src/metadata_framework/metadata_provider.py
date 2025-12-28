@@ -89,15 +89,16 @@ class JobParamsProvider:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT job_nm, invok_id, cron_schedule 
+                    SELECT job_nm, invok_id, cron_schedule, partition_start_dt 
                     FROM etl_job 
                     WHERE actv_ind = TRUE AND cron_schedule IS NOT NULL
                 """)
-                for job_nm, invok_id, cron in cur.fetchall():
+                for job_nm, invok_id, cron, start_dt in cur.fetchall():
                     schedules.append({
                         "job_nm": job_nm,
                         "invok_id": invok_id,
-                        "cron_schedule": cron
+                        "cron_schedule": cron,
+                        "partition_start_dt": start_dt
                     })
         finally:
             conn.close()

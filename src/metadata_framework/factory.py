@@ -1,123 +1,160 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
 from pathlib import Path
 from dagster_dag_factory.factory.asset_factory import AssetFactory
 from dagster_dag_factory.factory.dagster_factory import DagsterFactory
 from .metadata_provider import JobParamsProvider
+from dagster import (
+    Definitions, 
+    ScheduleDefinition, 
+    AssetsDefinition,
+    AssetChecksDefinition
+)
 
 class ParamsAssetFactory(AssetFactory):
     def _get_template_vars(self, context) -> Dict[str, Any]:
-        # 🟢 Get base vars (partitions, env, etc) from core library
         template_vars = super()._get_template_vars(context)
-        
-        # Extract context info
         run_tags = context.run.tags if hasattr(context, "run") else {}
         invok_id = run_tags.get("invok_id")
-        
-        # 🟢 Smart Job Name Resolution
-        # Use 'job_nm' from tags first (most reliable for manual/scheduled runs)
-        # Fall back to context.job_name
         job_nm = run_tags.get("job_nm") or (context.job_name if hasattr(context, "job_name") else None)
-        
-        # When materializing from the Asset UI, Dagster uses '__ASSET_JOB'.
-        # If we didn't find a 'job_nm' tag, we will have to use the invok_id lookup.
         
         if invok_id:
             context.log.info(f"🔍 Loading parameters for Invok: {invok_id} (Job: {job_nm})")
             provider = JobParamsProvider(self.base_dir)
             params = provider.get_job_params(job_nm, invok_id)
-            
-            if not params:
-                context.log.error(f"❌ No parameters found in DB for job={job_nm}, invok={invok_id}.")
-            else:
+            if params:
                 context.log.info(f"✅ Successfully loaded {len(params)} parameters into run context.")
-            
             template_vars["params"] = params
         
         return template_vars
 
     def _wrap_operator(self, operator: Any, asset_conf: Dict[str, Any]) -> Any:
-        """
-        Injects Nexus Observability into the operator execution.
-        Captures asset-level snapshots and configs.
-        """
         from .extensions.observability import NexusObservability
         obs = NexusObservability()
-        
         asset_nm = asset_conf.get("name")
         operator.execute = obs.wrap_operator_execute(asset_nm, operator.execute)
         return operator
 
-from dagster import (
-    AssetExecutionContext, 
-    Definitions, 
-    ScheduleDefinition, 
-    RunRequest,
-    build_schedule_from_partitioned_job
-)
-
 class ParamsDagsterFactory(DagsterFactory):
     def __init__(self, base_dir: Path, **kwargs):
         super().__init__(base_dir, **kwargs)
-        # Swap the standard AssetFactory with our Params-aware version
         self.asset_factory = ParamsAssetFactory(self.base_dir)
 
     def build_definitions(self) -> Definitions:
-        # 1. Build standard definitions from YAML
+        """Injects global listeners after core construction."""
+        from .extensions.observability import nexus_listeners
         defs = super().build_definitions()
         
-        # 2. Fetch Dynamic Schedules
+        return Definitions(
+            assets=defs.assets,
+            jobs=defs.jobs,
+            schedules=defs.schedules,
+            sensors=defs.sensors + list(nexus_listeners),
+            resources=defs.resources,
+            asset_checks=defs.asset_checks
+        )
+
+    def _apply_overrides(self, all_configs: list) -> list:
+        """
+        Phase 2: Robust Transformation Phase.
+        Applies DB-driven overrides using whole-repo topological awareness.
+        """
         provider = JobParamsProvider(self.base_dir)
         try:
-            params_schedules = provider.get_active_schedules()
+            active_schedules = provider.get_active_schedules()
         except Exception as e:
             print(f"⚠️ Warning: Failed to fetch dynamic schedules: {e}")
-            params_schedules = []
-        
-        jobs_map = {job.name: job for job in defs.jobs}
-        
-        dynamic_schedules = []
-        for sched in params_schedules:
-            job_nm = sched['job_nm']
-            invok_id = sched['invok_id']
-            cron = sched['cron_schedule']
-            
-            if job_nm in jobs_map:
-                job = jobs_map[job_nm]
-                sched_name = f"{job_nm}_{invok_id}_schedule"
-                tags = {"invok_id": invok_id, "job_nm": job_nm}
-                
-                # 🟢 Check if this job is partitioned (e.g., Daily/Weekly)
-                # If so, we MUST use build_schedule_from_partitioned_job to avoid the partition_key error
-                is_partitioned = hasattr(job, "partitions_def") and job.partitions_def is not None
-                
-                if is_partitioned:
-                    # Dagster's partitioned schedule builder
-                    # For time-window partitions, it handles the Cron/RunRequest/Tags internally
-                    dynamic_sched = build_schedule_from_partitioned_job(
-                        name=sched_name,
-                        job=job,
-                        tags=tags
-                    )
-                else:
-                    # Standard non-partitioned schedule
-                    dynamic_sched = ScheduleDefinition(
-                        name=sched_name,
-                        job=job,
-                        cron_schedule=cron,
-                        tags=tags
-                    )
-                dynamic_schedules.append(dynamic_sched)
-            else:
-                print(f"⚠️ Warning: Dynamic schedule found for unknown job '{job_nm}'. Skipping.")
+            active_schedules = []
 
-        # 3. Inject Global Listeners
-        from .extensions.observability import nexus_listeners
+        if not active_schedules:
+            return all_configs
+
+        overridden_jobs = {s['job_nm']: s for s in active_schedules}
+        overridden_names = set(overridden_jobs.keys())
+
+        # 1. Build Whole-Repo Topology (Asset -> Jobs)
+        asset_to_jobs = {}
+        jobs_targeting_all = set()
         
-        # 4. Merge results
-        return Definitions.merge(
-            defs, 
-            Definitions(
-                schedules=dynamic_schedules,
-                sensors=nexus_listeners
-            )
-        )
+        for item in all_configs:
+            config = item["config"]
+            if "assets" in config:
+                for a_conf in config["assets"]:
+                    a_nm = a_conf.get("name")
+                    if a_nm:
+                        asset_to_jobs.setdefault(a_nm, set()).update({a_nm, f"{a_nm}_job"})
+            
+            if "jobs" in config:
+                for j_conf in config["jobs"]:
+                    j_nm = j_conf.get("name")
+                    if not j_nm: continue
+                    selection = j_conf.get("selection", [])
+                    if selection == "*":
+                        jobs_targeting_all.add(j_nm)
+                    elif isinstance(selection, list):
+                        for sel in selection:
+                            if isinstance(sel, str): asset_to_jobs.setdefault(sel, set()).add(j_nm)
+                    elif isinstance(selection, str):
+                        asset_to_jobs.setdefault(selection, set()).add(j_nm)
+
+        # 2. Apply Transformations
+        for item in all_configs:
+            config = item["config"]
+            
+            if "assets" in config:
+                for a_conf in config["assets"]:
+                    a_nm = a_conf.get("name")
+                    matched = (asset_to_jobs.get(a_nm, set()) | jobs_targeting_all) & overridden_names
+                    if matched:
+                        override = overridden_jobs[sorted(list(matched))[0]]
+                        a_conf.pop("cron", None)
+                        if "partitions_def" in a_conf:
+                            self._patch_partitions(a_conf["partitions_def"], override)
+
+            if "jobs" in config:
+                for j_conf in config["jobs"]:
+                    if j_conf.get("name") in overridden_names:
+                        override = overridden_jobs[j_conf["name"]]
+                        j_conf.pop("cron", None)
+                        if "partitions_def" in j_conf:
+                            self._patch_partitions(j_conf["partitions_def"], override)
+
+            # Suppress Legacy Triggers
+            if "schedules" in config:
+                config["schedules"] = [s for s in config["schedules"] if s.get("job") not in overridden_names]
+            if "sensors" in config:
+                config["sensors"] = [s for s in config["sensors"] if s.get("job") not in overridden_names]
+
+        # 3. Inject Dynamic Schedules
+        dynamic_schedules = []
+        for sched in active_schedules:
+            dynamic_schedules.append({
+                "name": f"{sched['job_nm']}_{sched['invok_id']}_schedule",
+                "job": sched['job_nm'],
+                "cron": sched['cron_schedule'],
+                "tags": {"invok_id": sched['invok_id'], "job_nm": sched['job_nm']}
+            })
+
+        if dynamic_schedules:
+            all_configs.append({
+                "config": {"schedules": dynamic_schedules},
+                "file": Path("METADATA_DYNAMIC_OVERRIDES.yaml")
+            })
+
+        return all_configs
+
+    def _patch_partitions(self, p_conf: dict, override: dict):
+        cron_str = override.get("cron_schedule")
+        start_date = override.get("partition_start_dt")
+        
+        if start_date:
+            p_conf["start_date"] = start_date.isoformat()
+            
+        if cron_str:
+            parts = cron_str.split()
+            if len(parts) >= 2:
+                try:
+                    p_conf["minute_offset"] = int(parts[0])
+                    p_conf["hour_offset"] = int(parts[1])
+                except (ValueError, IndexError): pass
+            if p_conf.get("type") == "cron":
+                p_conf["cron_schedule"] = cron_str

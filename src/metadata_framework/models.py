@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger, CHAR, UniqueConstraint
+    Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger, CHAR, UniqueConstraint, Date
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
@@ -24,6 +24,7 @@ class ETLJob(Base):
     source_conn_nm = Column(String(255), ForeignKey("etl_connection.conn_nm"))
     target_conn_nm = Column(String(255), ForeignKey("etl_connection.conn_nm"))
     cron_schedule = Column(String(100))
+    partition_start_dt = Column(Date)
     actv_ind = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
