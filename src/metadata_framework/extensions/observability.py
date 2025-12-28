@@ -28,7 +28,10 @@ def nexus_job_started_sensor(context: RunStatusSensorContext):
     strt_dttm = datetime.fromtimestamp(stats.start_time, tz=timezone.utc).replace(tzinfo=None) if stats.start_time else None
     
     context.log.info(f"Nexus Observability: Logging START for job={job_nm}, run_id={run.run_id}, mode={run_mode}, start_time={strt_dttm}")
-    provider.log_job_start(run.run_id, job_nm, invok_id, run_mode, strt_dttm=strt_dttm)
+    try:
+        provider.log_job_start(run.run_id, job_nm, invok_id, run_mode, strt_dttm=strt_dttm)
+    except Exception as e:
+        context.log.error(f"❌ Nexus Observability: Failed to log job start: {e}")
 
 @run_status_sensor(run_status=DagsterRunStatus.SUCCESS)
 def nexus_job_success_sensor(context: RunStatusSensorContext):
@@ -39,7 +42,25 @@ def nexus_job_success_sensor(context: RunStatusSensorContext):
     end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
     
     context.log.info(f"Nexus Observability: Logging SUCCESS for run_id={run.run_id}, end_time={end_dttm}")
-    provider.log_job_end(run.run_id, status_cd='C', end_dttm=end_dttm)
+    try:
+        provider.log_job_end(run.run_id, status_cd='C', end_dttm=end_dttm)
+    except Exception as e:
+        context.log.error(f"❌ Nexus Observability: Failed to log job success: {e}")
+    
+    # 🟢 Step 3.3.5: Sync official step timestamps
+    try:
+        step_stats = context.instance.get_run_step_stats(run.run_id)
+        for step in step_stats:
+            # Strip partition suffix (e.g., 'asset_nm[partition]') to match etl_asset_status.asset_nm
+            base_asset_nm = step.step_key.split("[")[0]
+            s_start = datetime.fromtimestamp(step.start_time, tz=timezone.utc).replace(tzinfo=None) if step.start_time else None
+            s_end = datetime.fromtimestamp(step.end_time, tz=timezone.utc).replace(tzinfo=None) if step.end_time else None
+            
+            if s_start and s_end:
+                context.log.info(f"Nexus Observability: Syncing timings for {base_asset_nm} ({step.step_key})")
+                provider.sync_asset_timings(run.run_id, base_asset_nm, s_start, s_end)
+    except Exception as e:
+        context.log.warning(f"Failed to sync asset timings: {e}")
 
 @run_status_sensor(run_status=DagsterRunStatus.FAILURE)
 def nexus_job_failure_sensor(context: RunStatusSensorContext):
@@ -50,7 +71,24 @@ def nexus_job_failure_sensor(context: RunStatusSensorContext):
     end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
     
     context.log.info(f"Nexus Observability: Logging FAILURE for run_id={run.run_id}, end_time={end_dttm}")
-    provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm)
+    try:
+        provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm)
+    except Exception as e:
+        context.log.error(f"❌ Nexus Observability: Failed to log job failure: {e}")
+    
+    # Sync timings even on failure (important for seeing where it stopped)
+    try:
+        step_stats = context.instance.get_run_step_stats(run.run_id)
+        for step in step_stats:
+            base_asset_nm = step.step_key.split("[")[0]
+            s_start = datetime.fromtimestamp(step.start_time, tz=timezone.utc).replace(tzinfo=None) if step.start_time else None
+            s_end = datetime.fromtimestamp(step.end_time, tz=timezone.utc).replace(tzinfo=None) if step.end_time else None
+            
+            if s_start and s_end:
+                context.log.info(f"Nexus Observability: Syncing failure timings for {base_asset_nm}")
+                provider.sync_asset_timings(run.run_id, base_asset_nm, s_start, s_end)
+    except Exception as e:
+        context.log.warning(f"Failed to sync failure asset timings: {e}")
 
 @run_status_sensor(run_status=DagsterRunStatus.CANCELED)
 def nexus_job_canceled_sensor(context: RunStatusSensorContext):
@@ -61,7 +99,10 @@ def nexus_job_canceled_sensor(context: RunStatusSensorContext):
     end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
     
     context.log.info(f"Nexus Observability: Logging CANCELLATION for run_id={run.run_id}, end_time={end_dttm}")
-    provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm) # Mark as Aborted
+    try:
+        provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm) # Mark as Aborted
+    except Exception as e:
+        context.log.error(f"❌ Nexus Observability: Failed to log job cancellation: {e}")
 
 # Sensor list for registration
 nexus_listeners = [
@@ -85,6 +126,7 @@ def to_json_serializable(obj):
         return obj
     return str(obj)
 
+
 class NexusObservability:
     """Extension for asset-level tracking (Phase 3.3)"""
     def __init__(self, db_url: Optional[str] = None):
@@ -104,10 +146,10 @@ class NexusObservability:
             run_id = context.run_id
             asset_nm = name
             
-            # Prune and serialize template_vars
+            # 🟢 Step 3.3.3: Capture high-fidelity config snapshots
+            # We prioritize specific keys to avoid bloat
             pruned_tpl_vars = {}
             if isinstance(template_vars, dict):
-                # We prioritize logging specific keys to avoid bloat
                 for k in ["vars", "run_tags", "metadata", "partition_key", "trigger"]:
                     if k in template_vars:
                         pruned_tpl_vars[k] = to_json_serializable(template_vars[k])
@@ -118,11 +160,15 @@ class NexusObservability:
                 "template_vars": pruned_tpl_vars
             }
             
+            # Start timing
+            start_time = datetime.utcnow()
+            
             self.provider.log_asset_start(
                 run_id=run_id,
                 asset_nm=asset_nm,
                 config_json=full_config,
-                partition_key=context.partition_key if hasattr(context, "has_partition_key") and context.has_partition_key else None
+                partition_key=context.partition_key if hasattr(context, "has_partition_key") and context.has_partition_key else None,
+                strt_dttm=start_time
             )
             
             try:
@@ -133,10 +179,10 @@ class NexusObservability:
                     template_vars=template_vars,
                     **kwargs
                 )
-                self.provider.log_asset_end(run_id, asset_nm, status_cd='C')
+                self.provider.log_asset_end(run_id, asset_nm, status_cd='C', end_dttm=datetime.utcnow())
                 return result
             except Exception as e:
-                self.provider.log_asset_end(run_id, asset_nm, status_cd='A', error_msg=str(e))
+                self.provider.log_asset_end(run_id, asset_nm, status_cd='A', end_dttm=datetime.utcnow(), error_msg=str(e))
                 raise e
 
         return tracked_execute

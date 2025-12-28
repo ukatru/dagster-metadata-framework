@@ -79,40 +79,43 @@ class NexusStatusProvider:
                 time.sleep(delay)
 
     def log_job_start(self, run_id: str, job_nm: str, invok_id: str, run_mode: str, strt_dttm: Optional[datetime] = None) -> Optional[int]:
-        """Creates a parent record in etl_job_status."""
+        """Atomic get-or-create for etl_job_status to handle race conditions."""
         def _execute():
             with self._session_scope() as session:
-                # 1. Check if it already exists (atomic start)
-                status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
-                if status:
-                    return status.btch_nbr
-                
-                # 2. If not, create it
                 actual_start = strt_dttm or datetime.utcnow()
-                status = ETLJobStatus(
-                    run_id=run_id,
-                    job_nm=job_nm,
-                    invok_id=invok_id,
-                    run_mde_txt=run_mode,
-                    btch_sts_cd='R',
-                    strt_dttm=actual_start
-                )
-                session.add(status)
-                try:
-                    session.flush() # Populate pk
-                    return status.btch_nbr
-                except Exception as e:
-                    # If someone else inserted it between our check and flush
-                    session.rollback()
-                    status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
-                    if status:
-                        return status.btch_nbr
-                    raise e
+                
+                # 1. Atomic Check & Create
+                status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
+                if not status:
+                    # 🌱 Create fresh record
+                    status = ETLJobStatus(
+                        run_id=run_id,
+                        job_nm=job_nm,
+                        invok_id=invok_id,
+                        run_mde_txt=run_mode,
+                        btch_sts_cd='R',
+                        strt_dttm=actual_start
+                    )
+                    session.add(status)
+                    try:
+                        session.flush()
+                    except Exception:
+                        session.rollback()
+                        # Someone else won the race, fetch theirs
+                        status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
+                else:
+                    # 🧩 Update stub record created by Asset if it exists
+                    if status.job_nm == "UNKNOWN" or status.btch_sts_cd == 'R':
+                        status.job_nm = job_nm
+                        status.invok_id = invok_id
+                        status.run_mde_txt = run_mode
+                
+                return status.btch_nbr if status else None
                     
         return self._retry_with_backoff(_execute)
 
     def log_job_end(self, run_id: str, status_cd: str, end_dttm: Optional[datetime] = None, error_msg: Optional[str] = None):
-        """Updates the parent record in etl_job_status."""
+        """Updates the parent record in etl_job_status, ensures it exists."""
         def _execute():
             with self._session_scope() as session:
                 status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
@@ -120,9 +123,8 @@ class NexusStatusProvider:
                     status.btch_sts_cd = status_cd
                     status.end_dttm = end_dttm or datetime.utcnow()
                     status.updt_dttm = datetime.utcnow()
-                    if error_msg:
-                        # Job status doesn't have err_msg, but could be added if needed
-                        pass
+                else:
+                    logger.warning(f"⚠️ Nexus: log_job_end called for non-existent Run ID: {run_id}")
         return self._retry_with_backoff(_execute)
 
     def log_asset_start(
@@ -132,16 +134,44 @@ class NexusStatusProvider:
         config_json: Optional[Dict[str, Any]] = None,
         parent_asset_nm: Optional[str] = None,
         partition_key: Optional[str] = None,
-        event_type: str = "Materialization"
+        event_type: str = "Materialization",
+        strt_dttm: Optional[datetime] = None
     ) -> Optional[int]:
         """Creates a child record in etl_asset_status."""
         def _execute():
             with self._session_scope() as session:
-                # 1. Lookup batch number by run_id
-                job_status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
+                # 1. Lookup batch number by run_id (with small retry for race condition)
+                job_status = None
+                for _ in range(3):
+                    job_status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
+                    if job_status:
+                        break
+                    session.rollback() # Ensure we see fresh data
+                    time.sleep(0.5)
+                
                 if not job_status:
-                    logger.warning(f"Could not find parent job status for Run ID: {run_id}")
-                    return None
+                    # 🟢 Self-Healing: Create a stub job record if the sensor is slow.
+                    # This prevents the asset from orphaning. The sensor will later "merge" into this.
+                    logger.info(f"🌱 Nexus Observability: Creating stub job record for Run ID: {run_id}")
+                    
+                    job_nm = "UNKNOWN"
+                    invok_id = "UNKNOWN"
+                    if config_json and "template_vars" in config_json:
+                        tags = config_json["template_vars"].get("run_tags", {})
+                        invok_id = tags.get("invok_id", "UNKNOWN")
+                        metadata = config_json["template_vars"].get("metadata", {})
+                        job_nm = metadata.get("_job_nm", "UNKNOWN")
+                    
+                    job_status = ETLJobStatus(
+                        run_id=run_id,
+                        job_nm=job_nm,
+                        invok_id=invok_id,
+                        run_mde_txt='MANUAL', # Default to manual, sensor will update
+                        btch_sts_cd='R',
+                        strt_dttm=datetime.utcnow()
+                    )
+                    session.add(job_status)
+                    session.flush() # Get the btch_nbr (id)
                 
                 asset_status = ETLAssetStatus(
                     btch_nbr=job_status.btch_nbr,
@@ -151,7 +181,7 @@ class NexusStatusProvider:
                     partition_key=partition_key,
                     dagster_event_type=event_type,
                     asset_sts_cd='R',
-                    strt_dttm=datetime.utcnow()
+                    strt_dttm=strt_dttm or datetime.utcnow()
                 )
                 session.add(asset_status)
                 session.flush()
@@ -163,6 +193,7 @@ class NexusStatusProvider:
         run_id: str, 
         asset_nm: str, 
         status_cd: str, 
+        end_dttm: Optional[datetime] = None,
         error_msg: Optional[str] = None
     ):
         """Updates child record in etl_asset_status."""
@@ -180,7 +211,25 @@ class NexusStatusProvider:
                 
                 if asset_status:
                     asset_status.asset_sts_cd = status_cd
-                    asset_status.end_dttm = datetime.utcnow()
+                    asset_status.end_dttm = end_dttm or datetime.utcnow()
                     if error_msg:
                         asset_status.err_msg_txt = error_msg
+        return self._retry_with_backoff(_execute)
+
+    def sync_asset_timings(self, run_id: str, asset_nm: str, strt_dttm: datetime, end_dttm: datetime):
+        """Standardizes asset timings to match official Dagster event logs."""
+        def _execute():
+            with self._session_scope() as session:
+                job_status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
+                if not job_status:
+                    return
+                
+                asset_status = session.query(ETLAssetStatus).filter_by(
+                    btch_nbr=job_status.btch_nbr, 
+                    asset_nm=asset_nm
+                ).first()
+                
+                if asset_status:
+                    asset_status.strt_dttm = strt_dttm
+                    asset_status.end_dttm = end_dttm
         return self._retry_with_backoff(_execute)
