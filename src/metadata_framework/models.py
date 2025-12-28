@@ -70,7 +70,7 @@ class ETLAssetStatus(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     btch_nbr = Column(BigInteger, ForeignKey("etl_job_status.btch_nbr", ondelete="CASCADE"), nullable=False)
     asset_nm = Column(String(256), nullable=False)
-    parent_asset_nm = Column(String(256))
+    parent_assets = Column(JSONB) # List of upstream asset names
     config_json = Column(JSONB)
     partition_key = Column(String(255))
     dagster_event_type = Column(String(50)) # Materialization, Check, etc.

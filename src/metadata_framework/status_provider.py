@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 import time
 import logging
-from datetime import datetime
-from typing import Optional, Any, Dict
+from datetime import datetime, timezone
+from typing import Optional, Any, Dict, List
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
@@ -35,9 +35,14 @@ class NexusStatusProvider:
             port = os.getenv("POSTGRES_PORT", "5432")
             db = os.getenv("POSTGRES_DB", "postgres")
             db_url = f"postgresql://{user}:{password}@{host}:{port}/{db}"
+        else:
+            password = None # Avoid UnboundLocalError if db_url is provided
         
         # Diagnostics
-        display_url = db_url.replace(password, "****") if (password and password != "") else db_url
+        display_url = db_url
+        if password and password != "":
+            display_url = db_url.replace(password, "****")
+        
         logger.info(f"🚀 Nexus StatusProvider Init: url={display_url}, env={env_status}, debug={self.debug_mode}")
         
         self.engine = create_engine(db_url, pool_pre_ping=True)
@@ -53,13 +58,14 @@ class NexusStatusProvider:
         except Exception as e:
             session.rollback()
             msg = f"❌ Nexus Observability Error: {str(e)}"
-            logger.error(msg)
-            
             # If explicit debug is enabled, we hard-fail
             if self.debug_mode:
+                logger.error(msg)
                 raise RuntimeError(msg) from e
             
             # 🟢 SOFT-FAIL: Default behavior is to keep the pipeline alive
+            # But we log it once clearly.
+            logger.warning(f"Nexus Observability Soft-Fail: {str(e)}")
         finally:
             session.close()
 
@@ -82,7 +88,7 @@ class NexusStatusProvider:
         """Atomic get-or-create for etl_job_status to handle race conditions."""
         def _execute():
             with self._session_scope() as session:
-                actual_start = strt_dttm or datetime.utcnow()
+                actual_start = strt_dttm or datetime.now(timezone.utc).replace(tzinfo=None)
                 
                 # 1. Atomic Check & Create
                 status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
@@ -109,8 +115,13 @@ class NexusStatusProvider:
                         status.job_nm = job_nm
                         status.invok_id = invok_id
                         status.run_mde_txt = run_mode
+                        # 🟢 Update start time if official sensor provides an earlier/more accurate one
+                        if strt_dttm:
+                            status.strt_dttm = strt_dttm
                 
-                return status.btch_nbr if status else None
+                btch_nbr = status.btch_nbr if status else None
+                logger.info(f"✅ Nexus (log_job_start): Recorded run_id={run_id}, job={job_nm}, btch_nbr={btch_nbr}")
+                return btch_nbr
                     
         return self._retry_with_backoff(_execute)
 
@@ -121,8 +132,9 @@ class NexusStatusProvider:
                 status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
                 if status:
                     status.btch_sts_cd = status_cd
-                    status.end_dttm = end_dttm or datetime.utcnow()
-                    status.updt_dttm = datetime.utcnow()
+                    status.end_dttm = end_dttm or datetime.now(timezone.utc).replace(tzinfo=None)
+                    status.updt_dttm = datetime.now(timezone.utc).replace(tzinfo=None)
+                    logger.info(f"✅ Nexus (log_job_end): Finalized run_id={run_id}, status={status_cd}")
                 else:
                     logger.warning(f"⚠️ Nexus: log_job_end called for non-existent Run ID: {run_id}")
         return self._retry_with_backoff(_execute)
@@ -132,7 +144,7 @@ class NexusStatusProvider:
         run_id: str, 
         asset_nm: str, 
         config_json: Optional[Dict[str, Any]] = None,
-        parent_asset_nm: Optional[str] = None,
+        parent_assets: Optional[List[str]] = None,
         partition_key: Optional[str] = None,
         event_type: str = "Materialization",
         strt_dttm: Optional[datetime] = None
@@ -159,8 +171,8 @@ class NexusStatusProvider:
                     if config_json and "template_vars" in config_json:
                         tags = config_json["template_vars"].get("run_tags", {})
                         invok_id = tags.get("invok_id", "UNKNOWN")
-                        metadata = config_json["template_vars"].get("metadata", {})
-                        job_nm = metadata.get("_job_nm", "UNKNOWN")
+                        params = config_json["template_vars"].get("params", {})
+                        job_nm = params.get("_job_nm", "UNKNOWN")
                     
                     job_status = ETLJobStatus(
                         run_id=run_id,
@@ -168,7 +180,7 @@ class NexusStatusProvider:
                         invok_id=invok_id,
                         run_mde_txt='MANUAL', # Default to manual, sensor will update
                         btch_sts_cd='R',
-                        strt_dttm=datetime.utcnow()
+                        strt_dttm=datetime.now(timezone.utc).replace(tzinfo=None)
                     )
                     session.add(job_status)
                     session.flush() # Get the btch_nbr (id)
@@ -176,15 +188,18 @@ class NexusStatusProvider:
                 asset_status = ETLAssetStatus(
                     btch_nbr=job_status.btch_nbr,
                     asset_nm=asset_nm,
-                    parent_asset_nm=parent_asset_nm,
+                    parent_assets=parent_assets,
                     config_json=config_json,
                     partition_key=partition_key,
                     dagster_event_type=event_type,
                     asset_sts_cd='R',
-                    strt_dttm=strt_dttm or datetime.utcnow()
+                    strt_dttm=strt_dttm or datetime.now(timezone.utc).replace(tzinfo=None)
                 )
                 session.add(asset_status)
                 session.flush()
+                
+                upstr_cnt = len(parent_assets) if parent_assets else 0
+                logger.info(f"✅ Nexus (log_asset_start): Recorded asset={asset_nm}, run_id={run_id}, upstreams={upstr_cnt}")
                 return asset_status.id
         return self._retry_with_backoff(_execute)
 
@@ -211,9 +226,10 @@ class NexusStatusProvider:
                 
                 if asset_status:
                     asset_status.asset_sts_cd = status_cd
-                    asset_status.end_dttm = end_dttm or datetime.utcnow()
+                    asset_status.end_dttm = end_dttm or datetime.now(timezone.utc).replace(tzinfo=None)
                     if error_msg:
                         asset_status.err_msg_txt = error_msg
+                    logger.info(f"✅ Nexus (log_asset_end): Finalized asset={asset_nm}, run_id={run_id}, status={status_cd}")
         return self._retry_with_backoff(_execute)
 
     def sync_asset_timings(self, run_id: str, asset_nm: str, strt_dttm: datetime, end_dttm: datetime):
@@ -227,9 +243,10 @@ class NexusStatusProvider:
                 asset_status = session.query(ETLAssetStatus).filter_by(
                     btch_nbr=job_status.btch_nbr, 
                     asset_nm=asset_nm
-                ).first()
+                ).order_by(ETLAssetStatus.strt_dttm.desc()).first() # Handle retries: sync the latest one
                 
                 if asset_status:
                     asset_status.strt_dttm = strt_dttm
                     asset_status.end_dttm = end_dttm
+                    logger.info(f"✅ Nexus (sync_asset_timings): Synced timings for {asset_nm}, run_id={run_id}")
         return self._retry_with_backoff(_execute)

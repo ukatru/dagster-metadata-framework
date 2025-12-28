@@ -160,13 +160,22 @@ class NexusObservability:
                 "template_vars": pruned_tpl_vars
             }
             
+            # 🟢 Step 4.2: Extract Lineage (Upstream Parents)
+            # We extract from context.assets_def which contains the full graph info
+            upstreams = []
+            if hasattr(context, "assets_def") and context.assets_def:
+                # keys_by_input_name contains all official AssetIn dependencies
+                for asset_key in context.assets_def.keys_by_input_name.values():
+                    upstreams.append(asset_key.to_user_string())
+            
             # Start timing
-            start_time = datetime.utcnow()
+            start_time = datetime.now(timezone.utc).replace(tzinfo=None)
             
             self.provider.log_asset_start(
                 run_id=run_id,
                 asset_nm=asset_nm,
                 config_json=full_config,
+                parent_assets=upstreams,
                 partition_key=context.partition_key if hasattr(context, "has_partition_key") and context.has_partition_key else None,
                 strt_dttm=start_time
             )
@@ -179,10 +188,10 @@ class NexusObservability:
                     template_vars=template_vars,
                     **kwargs
                 )
-                self.provider.log_asset_end(run_id, asset_nm, status_cd='C', end_dttm=datetime.utcnow())
+                self.provider.log_asset_end(run_id, asset_nm, status_cd='C', end_dttm=datetime.now(timezone.utc).replace(tzinfo=None))
                 return result
             except Exception as e:
-                self.provider.log_asset_end(run_id, asset_nm, status_cd='A', end_dttm=datetime.utcnow(), error_msg=str(e))
+                self.provider.log_asset_end(run_id, asset_nm, status_cd='A', end_dttm=datetime.now(timezone.utc).replace(tzinfo=None), error_msg=str(e))
                 raise e
 
         return tracked_execute
