@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pathlib import Path
 from dagster_dag_factory.factory.asset_factory import AssetFactory
 from dagster_dag_factory.factory.dagster_factory import DagsterFactory
@@ -7,10 +7,26 @@ from dagster import (
     Definitions, 
     ScheduleDefinition, 
     AssetsDefinition,
-    AssetChecksDefinition
+    AssetChecksDefinition,
+    JobDefinition,
+    SensorDefinition,
+    RunRequest
 )
 
 class ParamsAssetFactory(AssetFactory):
+    def _create_asset(self, config: Dict[str, Any]) -> List[Any]:
+        # 🟢 Inject logical job name into asset metadata for runtime discovery
+        # This avoids hardcoded string checks in sensors/providers.
+        if "metadata" not in config:
+             config["metadata"] = {}
+        
+        # We assume the default job name for a standalone asset is {name}_job
+        # but if it's already part of a job block, that will override later.
+        if "job_nm" not in config["metadata"]:
+             config["metadata"]["job_nm"] = f"{config['name']}_job"
+             
+        return super()._create_asset(config)
+
     def _get_template_vars(self, context) -> Dict[str, Any]:
         template_vars = super()._get_template_vars(context)
         try:
@@ -44,13 +60,30 @@ class ParamsDagsterFactory(DagsterFactory):
         self.asset_factory = ParamsAssetFactory(self.base_dir)
 
     def build_definitions(self) -> Definitions:
-        """Injects global listeners after core construction."""
+        """Injects global listeners and observability tags after core construction."""
         from .extensions.observability import nexus_listeners
         defs = super().build_definitions()
         
+        # 🟢 Observability Tag Management (Framework Layer)
+        # We post-process the resulting Definitions to ensure consistency.
+        # JobDefinition supports with_tags, but Schedule/Sensor are more rigid.
+        
+        processed_jobs = []
+        for job in defs.jobs:
+            if isinstance(job, JobDefinition):
+                tags = job.tags or {}
+                if "job_nm" not in tags:
+                    tags = {**tags, "job_nm": job.name}
+                processed_jobs.append(job.with_tags(tags))
+            else:
+                processed_jobs.append(job)
+
+        # For Schedules and Sensors, if they are missing tags, we rely on the 
+        # underlying job's tags (which we just fixed) or the runtime fallback logic.
+        
         return Definitions(
             assets=defs.assets,
-            jobs=defs.jobs,
+            jobs=processed_jobs,
             schedules=defs.schedules,
             sensors=defs.sensors + list(nexus_listeners),
             resources=defs.resources,

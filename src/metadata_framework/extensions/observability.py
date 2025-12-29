@@ -146,6 +146,25 @@ class NexusObservability:
             run_id = context.run_id
             asset_nm = name
             
+            # 🟢 Step 3.3.4: Resolve Logical Job Name
+            # We look for a 'job_nm' tag first, then fall back to asset metadata, then the Dagster run job name.
+            tags = context.run.tags if hasattr(context, "run") else {}
+            logical_job_nm = tags.get("job_nm")
+            
+            if not logical_job_nm or logical_job_nm == "__ASSET_JOB":
+                # Fallback to asset's own metadata (injected during build)
+                if hasattr(context, "assets_def") and context.assets_def:
+                    metadata = context.assets_def.metadata_by_key.get(context.asset_key, {})
+                    value = metadata.get("job_nm")
+                    # Handle TextMetadataValue or raw string
+                    if hasattr(value, "value"):
+                        logical_job_nm = value.value
+                    elif isinstance(value, str):
+                        logical_job_nm = value
+            
+            # Absolute fallback
+            logical_job_nm = logical_job_nm or context.job_name or "UNKNOWN_JOB"
+            
             # 🟢 Step 3.3.3: Capture high-fidelity config snapshots
             # We prioritize specific keys to avoid bloat
             pruned_tpl_vars = {}
@@ -177,7 +196,8 @@ class NexusObservability:
                 config_json=full_config,
                 parent_assets=upstreams,
                 partition_key=context.partition_key if hasattr(context, "has_partition_key") and context.has_partition_key else None,
-                strt_dttm=start_time
+                strt_dttm=start_time,
+                job_nm=logical_job_nm
             )
             
             try:

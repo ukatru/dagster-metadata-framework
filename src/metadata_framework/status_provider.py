@@ -113,14 +113,15 @@ class NexusStatusProvider:
                         status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
                 else:
                     # 🧩 Update stub record created by Asset if it exists
-                    if status.job_nm == "UNKNOWN" or status.btch_sts_cd == 'R':
+                    # Smarter update: prioritize meaningful names over generic placeholders like __ASSET_JOB
+                    if status.job_nm == "UNKNOWN":
                         status.job_nm = job_nm
-                        status.invok_id = invok_id
-                        status.run_mde_txt = run_mode
-                        # 🟢 Update start time if official sensor provides an earlier/more accurate one
-                        if strt_dttm:
-                            status.strt_dttm = strt_dttm
-                
+                    elif job_nm != "__ASSET_JOB" and status.job_nm == "__ASSET_JOB":
+                        status.job_nm = job_nm
+                        
+                    status.invok_id = invok_id
+                    status.run_mde_txt = run_mode
+                # 🟢 Update start time if official sensor provides an earlier/more accurate one
                 btch_nbr = status.btch_nbr if status else None
                 logger.info(f"✅ Nexus (log_job_start): Recorded run_id={run_id}, job={job_nm}, btch_nbr={btch_nbr}")
                 return btch_nbr
@@ -149,7 +150,8 @@ class NexusStatusProvider:
         parent_assets: Optional[List[str]] = None,
         partition_key: Optional[str] = None,
         event_type: str = "Materialization",
-        strt_dttm: Optional[datetime] = None
+        strt_dttm: Optional[datetime] = None,
+        job_nm: Optional[str] = None
     ) -> Optional[int]:
         """Creates a child record in etl_asset_status."""
         def _execute():
@@ -186,6 +188,12 @@ class NexusStatusProvider:
                     )
                     session.add(job_status)
                     session.flush() # Get the btch_nbr (id)
+                else:
+                    # 🟢 Self-Healing: If parent exists but is generic, update it with discovery data
+                    if job_nm and job_nm != "__ASSET_JOB":
+                        if job_status.job_nm == "UNKNOWN" or job_status.job_nm == "__ASSET_JOB":
+                             job_status.job_nm = job_nm
+                             job_status.invok_id = invok_id or job_status.invok_id
                 
                 asset_status = ETLAssetStatus(
                     btch_nbr=job_status.btch_nbr,
