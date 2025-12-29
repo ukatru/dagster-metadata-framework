@@ -7,15 +7,25 @@ from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
 
-class ETLConnection(Base):
+class AuditMixin:
+    """
+    Mixin to add mandatory audit columns to every table.
+    Ensures traceability of who/what created and updated records.
+    """
+    creat_by_nm = Column(String(100), nullable=False, default='DAGSTER')
+    creat_dttm = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updt_by_nm = Column(String(100))
+    updt_dttm = Column(DateTime, onupdate=datetime.utcnow)
+
+class ETLConnection(Base, AuditMixin):
     __tablename__ = "etl_connection"
     
     id = Column(Integer, primary_key=True)
     conn_nm = Column(String(255), unique=True, nullable=False)
     conn_type = Column(String(50), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # Removing legacy created_at in favor of AuditMixin
 
-class ETLSchedule(Base):
+class ETLSchedule(Base, AuditMixin):
     __tablename__ = "etl_schedule"
     
     id = Column(Integer, primary_key=True)
@@ -23,9 +33,9 @@ class ETLSchedule(Base):
     cron = Column(String(100), nullable=False)
     timezone = Column(String(100))
     actv_ind = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # Removing legacy created_at in favor of AuditMixin
 
-class ETLJob(Base):
+class ETLJob(Base, AuditMixin):
     __tablename__ = "etl_job"
     
     id = Column(Integer, primary_key=True)
@@ -37,30 +47,43 @@ class ETLJob(Base):
     cron_schedule = Column(String(100)) # Legacy, will be deprecated
     partition_start_dt = Column(Date)
     actv_ind = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # Removing legacy created_at in favor of AuditMixin
     
     __table_args__ = (
         UniqueConstraint("job_nm", "invok_id", name="uq_job_invok"),
         {"sqlite_autoincrement": True}, # For testing if needed
     )
 
-class ETLJobParameter(Base):
+class ETLJobParameter(Base, AuditMixin):
     __tablename__ = "etl_job_parameter"
     
     id = Column(Integer, primary_key=True)
     etl_job_id = Column(Integer, ForeignKey("etl_job.id", ondelete="CASCADE"), unique=True)
     config_json = Column(JSONB, nullable=False, default={})
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Removing legacy updated_at in favor of AuditMixin
 
-class ETLParameter(Base):
+class ETLParameter(Base, AuditMixin):
     __tablename__ = "etl_parameter"
     
     id = Column(Integer, primary_key=True)
     parm_nm = Column(String(255), unique=True, nullable=False)
     parm_value = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    # Removing legacy created_at in favor of AuditMixin
 
-class ETLJobStatus(Base):
+class ETLParamsSchema(Base, AuditMixin):
+    """
+    Developer Contract Table.
+    Stores the expected parameter schema for a job name.
+    """
+    __tablename__ = "etl_params_schema"
+    
+    id = Column(Integer, primary_key=True)
+    job_nm = Column(String(255), unique=True, nullable=False)
+    schema_json = Column(JSONB, nullable=False)
+    description = Column(Text)
+    is_strict = Column(Boolean, default=False)
+
+class ETLJobStatus(Base, AuditMixin):
     __tablename__ = "etl_job_status"
     
     btch_nbr = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -71,12 +94,9 @@ class ETLJobStatus(Base):
     end_dttm = Column(DateTime)
     btch_sts_cd = Column(CHAR(1), default='R') # R, C, A
     run_mde_txt = Column(String(50), nullable=False) # SCHEDULED, MANUAL, BACKFILL
-    updt_by_nm = Column(String(30))
-    updt_dttm = Column(DateTime, onupdate=datetime.utcnow)
-    creat_by_nm = Column(String(30), default='DAGSTER')
-    creat_dttm = Column(DateTime, default=datetime.utcnow)
+    # Audit columns are now provided by Mixin
 
-class ETLAssetStatus(Base):
+class ETLAssetStatus(Base, AuditMixin):
     __tablename__ = "etl_asset_status"
     
     id = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -90,4 +110,4 @@ class ETLAssetStatus(Base):
     end_dttm = Column(DateTime)
     asset_sts_cd = Column(CHAR(1), default='R') # R, C, A
     err_msg_txt = Column(Text)
-    creat_dttm = Column(DateTime, default=datetime.utcnow)
+    # Audit columns are now provided by Mixin
