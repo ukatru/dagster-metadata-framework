@@ -59,19 +59,37 @@ class ParamsAssetFactory(AssetFactory):
         return operator
 
 class ParamsDagsterFactory(DagsterFactory):
-    def __init__(self, base_dir: Path, **kwargs):
+    def __init__(
+        self, 
+        base_dir: Path, 
+        location_name: Optional[str] = None, 
+        observability_enabled: Optional[bool] = None, 
+        global_observability: Optional[bool] = None, 
+        **kwargs
+    ):
         super().__init__(base_dir, **kwargs)
+        import os
+        
         self.asset_factory = ParamsAssetFactory(self.base_dir)
+        
+        # 🟢 Priority 1: Constructor Argument | Priority 2: ENV Variable | Priority 3: Default
+        self.location_name = location_name or os.getenv("DAGSTER_LOCATION_NAME")
+        
+        if observability_enabled is not None:
+            self.observability_enabled = observability_enabled
+        else:
+            self.observability_enabled = os.getenv("NEXUS_OBSERVABILITY_ENABLED", "FALSE").upper() == "TRUE"
+            
+        if global_observability is not None:
+            self.global_observability = global_observability
+        else:
+            self.global_observability = os.getenv("NEXUS_GLOBAL_OBSERVABILITY", "FALSE").upper() == "TRUE"
 
     def build_definitions(self) -> Definitions:
         """Injects global listeners and observability tags after core construction."""
-        from .extensions.observability import nexus_listeners
         defs = super().build_definitions()
         
         # 🟢 Observability Tag Management (Framework Layer)
-        # We post-process the resulting Definitions to ensure consistency.
-        # JobDefinition supports with_tags, but Schedule/Sensor are more rigid.
-        
         processed_jobs = []
         for job in defs.jobs:
             if isinstance(job, JobDefinition):
@@ -82,14 +100,20 @@ class ParamsDagsterFactory(DagsterFactory):
             else:
                 processed_jobs.append(job)
 
-        # For Schedules and Sensors, if they are missing tags, we rely on the 
-        # underlying job's tags (which we just fixed) or the runtime fallback logic.
-        
+        # 🟢 Observability Hub Management (Namespacing & Scalability)
+        listeners = []
+        if self.observability_enabled:
+            from .extensions.observability import make_nexus_listeners
+            listeners = make_nexus_listeners(
+                location_name=self.location_name,
+                global_monitor=self.global_observability
+            )
+
         return Definitions(
             assets=defs.assets,
             jobs=processed_jobs,
             schedules=defs.schedules,
-            sensors=defs.sensors + list(nexus_listeners),
+            sensors=defs.sensors + listeners,
             resources=defs.resources,
             asset_checks=defs.asset_checks
         )

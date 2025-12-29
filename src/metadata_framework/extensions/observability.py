@@ -13,105 +13,112 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("nexus.observability")
 
-@run_status_sensor(run_status=DagsterRunStatus.STARTED)
-def nexus_job_started_sensor(context: RunStatusSensorContext):
-    provider = NexusStatusProvider()
-    run = context.dagster_run
-    tags = run.tags if hasattr(run, "tags") else {}
-    invok_id = tags.get("invok_id", "MANUAL")
-    job_nm = tags.get("job_nm") or run.job_name or "UNKNOWN_JOB"
+def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bool = False) -> List[Any]:
+    """
+    Dynamic factory for Nexus observability sensors.
     
-    is_scheduled = any(k.startswith("dagster/schedule") for k in tags.keys())
-    run_mode = "SCHEDULED" if is_scheduled else "MANUAL"
+    Args:
+        location_name: Optional prefix for sensor names to avoid collisions in Cloud.
+        global_monitor: If True, uses 'monitor_all_code_locations' to track all runs in the workspace.
+    """
+    prefix = f"{location_name}_" if location_name else ""
     
-    # Accurate start time from Dagster
-    stats = context.instance.get_run_stats(run.run_id)
-    strt_dttm = datetime.fromtimestamp(stats.start_time, tz=timezone.utc).replace(tzinfo=None) if stats.start_time else None
-    
-    context.log.info(f"Nexus Observability: Logging START for job={job_nm}, run_id={run.run_id}, mode={run_mode}, start_time={strt_dttm}")
-    try:
-        provider.log_job_start(run.run_id, job_nm, invok_id, run_mode, strt_dttm=strt_dttm)
-    except Exception as e:
-        context.log.error(f"❌ Nexus Observability: Failed to log job start: {e}")
+    # 🟢 1. Job Started Sensor
+    @run_status_sensor(
+        name=f"{prefix}nexus_job_started_sensor",
+        run_status=DagsterRunStatus.STARTED,
+        monitor_all_code_locations=global_monitor,
+        request_job=None # Only if needed for requests
+    )
+    def started_sensor(context: RunStatusSensorContext):
+        provider = NexusStatusProvider()
+        run = context.dagster_run
+        tags = run.tags if hasattr(run, "tags") else {}
+        invok_id = tags.get("invok_id", "MANUAL")
+        job_nm = tags.get("job_nm") or run.job_name or "UNKNOWN_JOB"
+        
+        is_scheduled = any(k.startswith("dagster/schedule") for k in tags.keys())
+        run_mode = "SCHEDULED" if is_scheduled else "MANUAL"
+        
+        stats = context.instance.get_run_stats(run.run_id)
+        strt_dttm = datetime.fromtimestamp(stats.start_time, tz=timezone.utc).replace(tzinfo=None) if stats.start_time else None
+        
+        context.log.info(f"Nexus Observability: Logging START for job={job_nm}, run_id={run.run_id}")
+        try:
+            provider.log_job_start(run.run_id, job_nm, invok_id, run_mode, strt_dttm=strt_dttm)
+        except Exception as e:
+            context.log.error(f"❌ Nexus Observability: Failed to log job start: {e}")
 
-@run_status_sensor(run_status=DagsterRunStatus.SUCCESS)
-def nexus_job_success_sensor(context: RunStatusSensorContext):
-    provider = NexusStatusProvider()
-    run = context.dagster_run
-    
-    stats = context.instance.get_run_stats(run.run_id)
-    end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
-    
-    context.log.info(f"Nexus Observability: Logging SUCCESS for run_id={run.run_id}, end_time={end_dttm}")
-    try:
-        provider.log_job_end(run.run_id, status_cd='C', end_dttm=end_dttm)
-    except Exception as e:
-        context.log.error(f"❌ Nexus Observability: Failed to log job success: {e}")
-    
-    # 🟢 Step 3.3.5: Sync official step timestamps
-    try:
-        step_stats = context.instance.get_run_step_stats(run.run_id)
-        for step in step_stats:
-            # Strip partition suffix (e.g., 'asset_nm[partition]') to match etl_asset_status.asset_nm
-            base_asset_nm = step.step_key.split("[")[0]
-            s_start = datetime.fromtimestamp(step.start_time, tz=timezone.utc).replace(tzinfo=None) if step.start_time else None
-            s_end = datetime.fromtimestamp(step.end_time, tz=timezone.utc).replace(tzinfo=None) if step.end_time else None
-            
-            if s_start and s_end:
-                context.log.info(f"Nexus Observability: Syncing timings for {base_asset_nm} ({step.step_key})")
-                provider.sync_asset_timings(run.run_id, base_asset_nm, s_start, s_end)
-    except Exception as e:
-        context.log.warning(f"Failed to sync asset timings: {e}")
+    # 🟢 2. Job Success Sensor
+    @run_status_sensor(
+        name=f"{prefix}nexus_job_success_sensor",
+        run_status=DagsterRunStatus.SUCCESS,
+        monitor_all_code_locations=global_monitor
+    )
+    def success_sensor(context: RunStatusSensorContext):
+        provider = NexusStatusProvider()
+        run = context.dagster_run
+        stats = context.instance.get_run_stats(run.run_id)
+        end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
+        
+        try:
+            provider.log_job_end(run.run_id, status_cd='C', end_dttm=end_dttm)
+            # Sync step-level timings (Assets)
+            step_stats = context.instance.get_run_step_stats(run.run_id)
+            for step in step_stats:
+                base_asset_nm = step.step_key.split("[")[0]
+                s_start = datetime.fromtimestamp(step.start_time, tz=timezone.utc).replace(tzinfo=None) if step.start_time else None
+                s_end = datetime.fromtimestamp(step.end_time, tz=timezone.utc).replace(tzinfo=None) if step.end_time else None
+                if s_start and s_end:
+                    provider.sync_asset_timings(run.run_id, base_asset_nm, s_start, s_end)
+        except Exception as e:
+            context.log.error(f"❌ Nexus Observability: Failed to finalize job success: {e}")
 
-@run_status_sensor(run_status=DagsterRunStatus.FAILURE)
-def nexus_job_failure_sensor(context: RunStatusSensorContext):
-    provider = NexusStatusProvider()
-    run = context.dagster_run
-    
-    stats = context.instance.get_run_stats(run.run_id)
-    end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
-    
-    context.log.info(f"Nexus Observability: Logging FAILURE for run_id={run.run_id}, end_time={end_dttm}")
-    try:
-        provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm)
-    except Exception as e:
-        context.log.error(f"❌ Nexus Observability: Failed to log job failure: {e}")
-    
-    # Sync timings even on failure (important for seeing where it stopped)
-    try:
-        step_stats = context.instance.get_run_step_stats(run.run_id)
-        for step in step_stats:
-            base_asset_nm = step.step_key.split("[")[0]
-            s_start = datetime.fromtimestamp(step.start_time, tz=timezone.utc).replace(tzinfo=None) if step.start_time else None
-            s_end = datetime.fromtimestamp(step.end_time, tz=timezone.utc).replace(tzinfo=None) if step.end_time else None
-            
-            if s_start and s_end:
-                context.log.info(f"Nexus Observability: Syncing failure timings for {base_asset_nm}")
-                provider.sync_asset_timings(run.run_id, base_asset_nm, s_start, s_end)
-    except Exception as e:
-        context.log.warning(f"Failed to sync failure asset timings: {e}")
+    # 🟢 3. Job Failure Sensor
+    @run_status_sensor(
+        name=f"{prefix}nexus_job_failure_sensor",
+        run_status=DagsterRunStatus.FAILURE,
+        monitor_all_code_locations=global_monitor
+    )
+    def failure_sensor(context: RunStatusSensorContext):
+        provider = NexusStatusProvider()
+        run = context.dagster_run
+        stats = context.instance.get_run_stats(run.run_id)
+        end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
+        
+        try:
+            provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm)
+            # Sync timings even on failure
+            step_stats = context.instance.get_run_step_stats(run.run_id)
+            for step in step_stats:
+                base_asset_nm = step.step_key.split("[")[0]
+                s_start = datetime.fromtimestamp(step.start_time, tz=timezone.utc).replace(tzinfo=None) if step.start_time else None
+                s_end = datetime.fromtimestamp(step.end_time, tz=timezone.utc).replace(tzinfo=None) if step.end_time else None
+                if s_start and s_end:
+                    provider.sync_asset_timings(run.run_id, base_asset_nm, s_start, s_end)
+        except Exception as e:
+            context.log.error(f"❌ Nexus Observability: Failed to log job failure: {e}")
 
-@run_status_sensor(run_status=DagsterRunStatus.CANCELED)
-def nexus_job_canceled_sensor(context: RunStatusSensorContext):
-    provider = NexusStatusProvider()
-    run = context.dagster_run
-    
-    stats = context.instance.get_run_stats(run.run_id)
-    end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
-    
-    context.log.info(f"Nexus Observability: Logging CANCELLATION for run_id={run.run_id}, end_time={end_dttm}")
-    try:
-        provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm) # Mark as Aborted
-    except Exception as e:
-        context.log.error(f"❌ Nexus Observability: Failed to log job cancellation: {e}")
+    # 🟢 4. Job Canceled Sensor
+    @run_status_sensor(
+        name=f"{prefix}nexus_job_canceled_sensor",
+        run_status=DagsterRunStatus.CANCELED,
+        monitor_all_code_locations=global_monitor
+    )
+    def canceled_sensor(context: RunStatusSensorContext):
+        provider = NexusStatusProvider()
+        run = context.dagster_run
+        stats = context.instance.get_run_stats(run.run_id)
+        end_dttm = datetime.fromtimestamp(stats.end_time, tz=timezone.utc).replace(tzinfo=None) if stats.end_time else None
+        try:
+            provider.log_job_end(run.run_id, status_cd='A', end_dttm=end_dttm)
+        except Exception as e:
+            context.log.error(f"❌ Nexus Observability: Failed to log job cancellation: {e}")
 
-# Sensor list for registration
-nexus_listeners = [
-    nexus_job_started_sensor,
-    nexus_job_success_sensor,
-    nexus_job_failure_sensor,
-    nexus_job_canceled_sensor
-]
+    return [started_sensor, success_sensor, failure_sensor, canceled_sensor]
+
+# Legacy default list for single-node deployments
+nexus_listeners = make_nexus_listeners()
 
 def to_json_serializable(obj):
     """Helper to ensure complex objects can be stored in JSONB."""
