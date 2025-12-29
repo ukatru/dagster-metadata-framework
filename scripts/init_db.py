@@ -48,6 +48,7 @@ def init_db():
     # 1. DROP (For Clean POC)
     cur.execute("DROP TABLE IF EXISTS etl_job_parameter CASCADE;")
     cur.execute("DROP TABLE IF EXISTS etl_job CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS etl_schedule CASCADE;") # New schedule table
     cur.execute("DROP TABLE IF EXISTS etl_connection CASCADE;")
     cur.execute("DROP TABLE IF EXISTS etl_asset_status CASCADE;")
     cur.execute("DROP TABLE IF EXISTS etl_job_status CASCADE;")
@@ -64,13 +65,25 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE TABLE etl_schedule (
+            id SERIAL PRIMARY KEY,
+            slug VARCHAR(255) UNIQUE NOT NULL,
+            cron VARCHAR(100) NOT NULL,
+            timezone VARCHAR(100),
+            actv_ind BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+    cur.execute("""
         CREATE TABLE etl_job (
             id SERIAL PRIMARY KEY,
             job_nm VARCHAR(255) NOT NULL,
             invok_id VARCHAR(255) NOT NULL,
             source_conn_nm VARCHAR(255) REFERENCES etl_connection(conn_nm),
             target_conn_nm VARCHAR(255) REFERENCES etl_connection(conn_nm),
-            cron_schedule VARCHAR(100),
+            schedule_id INTEGER REFERENCES etl_schedule(id), -- Linked to centralized schedule
+            cron_schedule VARCHAR(100), -- Legacy
             partition_start_dt DATE,
             actv_ind BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -130,39 +143,10 @@ def init_db():
         );
     """)
 
-    print("✅ Tables created. Seeding data for 'cross_ref_test_job'...")
-
-    # 3. SEED CONNECTIONS
-    # SFTP PROD
-    cur.execute("INSERT INTO etl_connection (conn_nm, conn_type) VALUES (%s, %s);", ("sftp_prod", "SFTP"))
-
-    # S3 PROD
-    cur.execute("INSERT INTO etl_connection (conn_nm, conn_type) VALUES (%s, %s);", ("s3_prod", "S3"))
-
-    # 4. SEED JOB (cross_ref_test_job for a test invoice)
-    # Note: We use the JOB_NM from the YAML
-    cur.execute("""
-        INSERT INTO etl_job (job_nm, invok_id, source_conn_nm, target_conn_nm, cron_schedule)
-        VALUES (%s, %s, %s, %s, %s) RETURNING id;
-    """, ("cross_ref_test_job", "TEST_INVOICE_001", "sftp_prod", "s3_prod", "0 5 * * *"))
-    job_id = cur.fetchone()[0]
-
-    # 5. SEED JOB PARAMETERS
-    # These match the {{ params.X }} handles in the dynamic YAML
-    cur.execute("""
-        INSERT INTO etl_job_parameter (etl_job_id, config_json)
-        VALUES (%s, %s);
-    """, (job_id, Json({
-        "source_path": "/home/ukatru/data",
-        "source_pattern": ".*\\.csv",
-        "target_bucket": "my-dagster-poc",
-        "target_key_pattern": "backups{{ source.path }}/{{ source.item.file_name }}"
-    })))
-
     conn.commit()
     cur.close()
     conn.close()
-    print("✨ Database successfully initialized and seeded!")
+    print("✨ Database successfully initialized!")
 
 if __name__ == "__main__":
     try:

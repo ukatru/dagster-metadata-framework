@@ -15,6 +15,16 @@ class ETLConnection(Base):
     conn_type = Column(String(50), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class ETLSchedule(Base):
+    __tablename__ = "etl_schedule"
+    
+    id = Column(Integer, primary_key=True)
+    slug = Column(String(255), unique=True, nullable=False)
+    cron = Column(String(100), nullable=False)
+    timezone = Column(String(100))
+    actv_ind = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class ETLJob(Base):
     __tablename__ = "etl_job"
     
@@ -23,7 +33,8 @@ class ETLJob(Base):
     invok_id = Column(String(255), nullable=False)
     source_conn_nm = Column(String(255), ForeignKey("etl_connection.conn_nm"))
     target_conn_nm = Column(String(255), ForeignKey("etl_connection.conn_nm"))
-    cron_schedule = Column(String(100))
+    schedule_id = Column(Integer, ForeignKey("etl_schedule.id")) # Linked to centralized schedule
+    cron_schedule = Column(String(100)) # Legacy, will be deprecated
     partition_start_dt = Column(Date)
     actv_ind = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 from metadata_framework.models import (
-    Base, ETLConnection, ETLJob, ETLJobParameter, ETLParameter
+    Base, ETLConnection, ETLSchedule, ETLJob, ETLJobParameter, ETLParameter
 )
 
 # Load env
@@ -39,7 +39,15 @@ def seed():
         global_bucket = ETLParameter(parm_nm="target_bucket", parm_value="my-dagster-poc")
         session.add_all([global_env, global_bucket])
 
-        # 4. Jobs
+        # 4. Schedules
+        daily_5am = ETLSchedule(slug="DAILY_5AM", cron="0 5 * * *")
+        daily_2am = ETLSchedule(slug="DAILY_2AM", cron="30 2 * * *")
+        daily_midnight = ETLSchedule(slug="DAILY_MIDNIGHT", cron="0 0 * * *")
+        
+        session.add_all([daily_5am, daily_2am, daily_midnight])
+        session.flush()
+
+        # 5. Jobs
         
         # Pipeline 1: cross_ref_test_job
         job1 = ETLJob(
@@ -47,7 +55,7 @@ def seed():
             invok_id="TEST_001",
             source_conn_nm="sftp_prod",
             target_conn_nm="s3_prod",
-            cron_schedule="18 20 * * *",
+            schedule_id=daily_5am.id,
             actv_ind=True
         )
         
@@ -57,7 +65,7 @@ def seed():
             invok_id="INC_PROD_01",
             source_conn_nm="sqlserver_prod",
             target_conn_nm="snowflake_conn",
-            cron_schedule="30 2 * * *",
+            schedule_id=daily_2am.id,
             actv_ind=True
         )
         
@@ -67,7 +75,7 @@ def seed():
             invok_id="REGIONAL_DAILY",
             source_conn_nm="sqlserver_mkt",
             target_conn_nm="s3_prod",
-            cron_schedule="0 0 * * *",
+            schedule_id=daily_midnight.id,
             actv_ind=True
         )
         
