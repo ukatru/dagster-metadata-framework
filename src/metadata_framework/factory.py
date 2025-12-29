@@ -126,15 +126,22 @@ class ParamsDagsterFactory(DagsterFactory):
         provider = JobParamsProvider(self.base_dir)
         try:
             active_schedules = provider.get_active_schedules()
+            batch_schedules = provider.get_batch_schedules()
         except Exception as e:
             print(f"⚠️ Warning: Failed to fetch dynamic schedules: {e}")
             active_schedules = []
+            batch_schedules = []
 
-        if not active_schedules:
+        if not active_schedules and not batch_schedules:
             return all_configs
 
         overridden_jobs = {s['job_nm']: s for s in active_schedules}
-        overridden_names = set(overridden_jobs.keys())
+        
+        # Consolidate ALL jobs that are managed by the DB (either 1:1 or Batch)
+        managed_job_names = set(overridden_jobs.keys())
+        for batch in batch_schedules:
+            for job in batch["jobs"]:
+                managed_job_names.add(job["name"])
 
         # 1. Build Whole-Repo Topology (Asset -> Jobs)
         asset_to_jobs = {}
@@ -168,7 +175,7 @@ class ParamsDagsterFactory(DagsterFactory):
             if "assets" in config:
                 for a_conf in config["assets"]:
                     a_nm = a_conf.get("name")
-                    matched = (asset_to_jobs.get(a_nm, set()) | jobs_targeting_all) & overridden_names
+                    matched = (asset_to_jobs.get(a_nm, set()) | jobs_targeting_all) & managed_job_names
                     if matched:
                         override = overridden_jobs[sorted(list(matched))[0]]
                         a_conf.pop("cron", None)
@@ -177,17 +184,18 @@ class ParamsDagsterFactory(DagsterFactory):
 
             if "jobs" in config:
                 for j_conf in config["jobs"]:
-                    if j_conf.get("name") in overridden_names:
-                        override = overridden_jobs[j_conf["name"]]
+                    if j_conf.get("name") in managed_job_names:
+                        # Priority 1: 1:1 Override (if it exists)
+                        override = overridden_jobs.get(j_conf["name"])
                         j_conf.pop("cron", None)
-                        if "partitions_def" in j_conf:
+                        if override and "partitions_def" in j_conf:
                             self._patch_partitions(j_conf["partitions_def"], override)
 
             # Suppress Legacy Triggers
             if "schedules" in config:
-                config["schedules"] = [s for s in config["schedules"] if s.get("job") not in overridden_names]
+                config["schedules"] = [s for s in config["schedules"] if s.get("job") not in managed_job_names]
             if "sensors" in config:
-                config["sensors"] = [s for s in config["sensors"] if s.get("job") not in overridden_names]
+                config["sensors"] = [s for s in config["sensors"] if s.get("job") not in managed_job_names]
 
         # 3. Inject Dynamic Schedules
         dynamic_schedules = []
@@ -197,6 +205,15 @@ class ParamsDagsterFactory(DagsterFactory):
                 "job": sched['job_nm'],
                 "cron": sched['cron_schedule'],
                 "tags": {"invok_id": sched['invok_id'], "job_nm": sched['job_nm']}
+            })
+
+        # Priority 2: Batch Schedules (Fan-Out)
+        for batch in batch_schedules:
+            dynamic_schedules.append({
+                "name": batch["name"],
+                "cron": batch["cron"],
+                "timezone": batch["timezone"],
+                "jobs": batch["jobs"] # 🚀 Using the new Core Lib Fan-Out Engine!
             })
 
         if dynamic_schedules:

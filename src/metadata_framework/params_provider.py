@@ -103,3 +103,37 @@ class JobParamsProvider:
         finally:
             conn.close()
         return schedules
+
+    def get_batch_schedules(self) -> list[Dict[str, Any]]:
+        """
+        Fetches centralized heartbeats (etl_schedule) and their linked jobs.
+        Returns a list of dicts: {slug, cron, timezone, jobs: [{name, tags}]}
+        """
+        schedules = {}
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                # 1. Fetch all active schedules and their linked active jobs in one join
+                cur.execute("""
+                    SELECT s.slug, s.cron, s.timezone, j.job_nm, j.invok_id
+                    FROM etl_schedule s
+                    JOIN etl_job j ON s.id = j.schedule_id
+                    WHERE s.actv_ind = TRUE AND j.actv_ind = TRUE
+                """)
+                
+                for slug, cron, tz, job_nm, invok_id in cur.fetchall():
+                    if slug not in schedules:
+                        schedules[slug] = {
+                            "name": f"nexus_heartbeat_{slug.lower()}",
+                            "cron": cron,
+                            "timezone": tz,
+                            "jobs": []
+                        }
+                    schedules[slug]["jobs"].append({
+                        "name": job_nm,
+                        "tags": {"invok_id": invok_id, "job_nm": job_nm}
+                    })
+        finally:
+            conn.close()
+            
+        return list(schedules.values())
