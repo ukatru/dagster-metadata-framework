@@ -1,4 +1,4 @@
 from .factory import ParamsDagsterFactory
-from .metadata_provider import JobParamsProvider
+from .params_provider import JobParamsProvider
 
 __all__ = ["ParamsDagsterFactory", "JobParamsProvider"]

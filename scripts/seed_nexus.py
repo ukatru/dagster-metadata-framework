@@ -9,7 +9,7 @@ from metadata_framework.models import (
 )
 
 # Load env
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 def seed():
     user = os.getenv("POSTGRES_USER", "postgres")
@@ -79,7 +79,7 @@ def seed():
             etl_job_id=job1.id,
             config_json={
                 "source_path": "/home/ukatru/data",
-                "target_key": "orders/{{ metadata._job_id }}/data.csv"
+                "target_key": "orders/{{ params._job_id }}/data.csv"
             }
         )
         

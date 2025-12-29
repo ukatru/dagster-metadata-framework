@@ -18,7 +18,9 @@ logger = logging.getLogger("nexus.observability")
 class NexusStatusProvider:
     def __init__(self, db_url: Optional[str] = None):
         # 🟢 Use absolute path to ensure we always find the correct .env
-        env_path = Path("/home/ukatru/github/dagster-metadata-framework/.env")
+        # 🟢 Use dynamic path to find .env relative to the src/ metadata_framework directory
+        # (StatusProvider is in src/metadata_framework/status_provider.py)
+        env_path = Path(__file__).parent.parent.parent / ".env"
         if env_path.exists():
             load_dotenv(dotenv_path=env_path)
             env_status = "Loaded"

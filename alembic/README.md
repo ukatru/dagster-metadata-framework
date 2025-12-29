@@ -1,6 +1,6 @@
 # Alembic Database Migrations
 
-This directory contains the [Alembic](https://alembic.sqlalchemy.org/) migration scripts for the Nexus Metadata Framework. It manages the schema for parameter injection, connection management, and observability logging.
+This directory contains the [Alembic](https://alembic.sqlalchemy.org/) migration scripts for the Nexus Params Framework. It manages the schema for parameter injection, connection management, and observability logging.
 
 ## Initial Repository Provisioning
 
@@ -27,7 +27,7 @@ To initialize the database for the first time in a new environment, follow these
     > [!WARNING]
     > Running `init_db.py` will drop existing tables. Use it only for fresh prototyping.
     ```bash
-    python init_db.py
+    python scripts/init_db.py
     ```
 
 ## Managing Migrations

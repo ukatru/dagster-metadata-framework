@@ -22,7 +22,7 @@ def load_env(path):
             print(f"DEBUG: Processed key: {k.strip()}")
 
 # Load environment
-env_path = Path("/home/ukatru/github/dagster-metadata-framework/.env")
+env_path = Path(__file__).parent.parent / ".env"
 load_env(env_path)
 
 print(f"DEBUG: Loaded keys: {[k for k in ['POSTGRES_DB', 'POSTGRES_USER', 'POSTGRES_PASSWORD', 'POSTGRES_HOST', 'POSTGRES_PORT'] if k in os.environ]}")
@@ -71,6 +71,7 @@ def init_db():
             source_conn_nm VARCHAR(255) REFERENCES etl_connection(conn_nm),
             target_conn_nm VARCHAR(255) REFERENCES etl_connection(conn_nm),
             cron_schedule VARCHAR(100),
+            partition_start_dt DATE,
             actv_ind BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT uq_job_invok UNIQUE (job_nm, invok_id)
@@ -100,11 +101,11 @@ def init_db():
             btch_nbr BIGSERIAL PRIMARY KEY,
             run_id VARCHAR(64) UNIQUE NOT NULL,
             job_nm VARCHAR(256) NOT NULL,
-            invok_id VARCHAR(10),
+            invok_id VARCHAR(255),
             strt_dttm TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             end_dttm TIMESTAMP,
             btch_sts_cd CHAR(1) DEFAULT 'R',
-            run_mde_txt VARCHAR(10) NOT NULL,
+            run_mde_txt VARCHAR(50) NOT NULL,
             updt_by_nm VARCHAR(30),
             updt_dttm TIMESTAMP,
             creat_by_nm VARCHAR(30) DEFAULT 'DAGSTER',
@@ -117,6 +118,10 @@ def init_db():
             id BIGSERIAL PRIMARY KEY,
             btch_nbr BIGINT REFERENCES etl_job_status(btch_nbr) ON DELETE CASCADE,
             asset_nm VARCHAR(256) NOT NULL,
+            parent_assets JSONB,
+            config_json JSONB,
+            partition_key VARCHAR(255),
+            dagster_event_type VARCHAR(50),
             strt_dttm TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             end_dttm TIMESTAMP,
             asset_sts_cd CHAR(1) DEFAULT 'R',
@@ -143,7 +148,7 @@ def init_db():
     job_id = cur.fetchone()[0]
 
     # 5. SEED JOB PARAMETERS
-    # These match the {{ metadata.X }} handles in the dynamic YAML
+    # These match the {{ params.X }} handles in the dynamic YAML
     cur.execute("""
         INSERT INTO etl_job_parameter (etl_job_id, config_json)
         VALUES (%s, %s);

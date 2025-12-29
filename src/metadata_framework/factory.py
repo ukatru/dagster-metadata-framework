@@ -2,7 +2,7 @@ from typing import Dict, Any, List
 from pathlib import Path
 from dagster_dag_factory.factory.asset_factory import AssetFactory
 from dagster_dag_factory.factory.dagster_factory import DagsterFactory
-from .metadata_provider import JobParamsProvider
+from .params_provider import JobParamsProvider
 from dagster import (
     Definitions, 
     ScheduleDefinition, 
@@ -13,7 +13,11 @@ from dagster import (
 class ParamsAssetFactory(AssetFactory):
     def _get_template_vars(self, context) -> Dict[str, Any]:
         template_vars = super()._get_template_vars(context)
-        run_tags = context.run.tags if hasattr(context, "run") else {}
+        try:
+            run_tags = context.run.tags if hasattr(context, "run") else {}
+        except Exception:
+            run_tags = getattr(context, "run_tags", {})
+            
         invok_id = run_tags.get("invok_id")
         job_nm = run_tags.get("job_nm") or (context.job_name if hasattr(context, "job_name") else None)
         
