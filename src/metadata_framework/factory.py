@@ -19,11 +19,15 @@ class ParamsAssetFactory(AssetFactory):
         # This avoids hardcoded string checks in sensors/providers.
         if "metadata" not in config:
              config["metadata"] = {}
+        if "tags" not in config:
+             config["tags"] = {}
         
         # We assume the default job name for a standalone asset is {name}_job
-        # but if it's already part of a job block, that will override later.
+        job_nm = f"{config['name']}_job"
         if "job_nm" not in config["metadata"]:
-             config["metadata"]["job_nm"] = f"{config['name']}_job"
+             config["metadata"]["job_nm"] = job_nm
+        if "job_nm" not in config["tags"]:
+             config["tags"]["job_nm"] = job_nm
              
         return super()._create_asset(config)
 

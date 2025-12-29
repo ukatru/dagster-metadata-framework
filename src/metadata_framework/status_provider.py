@@ -113,12 +113,7 @@ class NexusStatusProvider:
                         status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
                 else:
                     # 🧩 Update stub record created by Asset if it exists
-                    # Smarter update: prioritize meaningful names over generic placeholders like __ASSET_JOB
-                    if status.job_nm == "UNKNOWN":
-                        status.job_nm = job_nm
-                    elif job_nm != "__ASSET_JOB" and status.job_nm == "__ASSET_JOB":
-                        status.job_nm = job_nm
-                        
+                    status.job_nm = job_nm
                     status.invok_id = invok_id
                     status.run_mde_txt = run_mode
                 # 🟢 Update start time if official sensor provides an earlier/more accurate one
@@ -170,18 +165,17 @@ class NexusStatusProvider:
                     # This prevents the asset from orphaning. The sensor will later "merge" into this.
                     logger.info(f"🌱 Nexus Observability: Creating stub job record for Run ID: {run_id}")
                     
-                    job_nm = "UNKNOWN"
-                    invok_id = "UNKNOWN"
+                    resolved_job_nm = job_nm or "UNKNOWN"
+                    resolved_invok_id = "UNKNOWN"
+                    
                     if config_json and "template_vars" in config_json:
                         tags = config_json["template_vars"].get("run_tags", {})
-                        invok_id = tags.get("invok_id", "UNKNOWN")
-                        params = config_json["template_vars"].get("params", {})
-                        job_nm = params.get("_job_nm", "UNKNOWN")
+                        resolved_invok_id = tags.get("invok_id", "UNKNOWN")
                     
                     job_status = ETLJobStatus(
                         run_id=run_id,
-                        job_nm=job_nm,
-                        invok_id=invok_id,
+                        job_nm=resolved_job_nm,
+                        invok_id=resolved_invok_id,
                         run_mde_txt='MANUAL', # Default to manual, sensor will update
                         btch_sts_cd='R',
                         strt_dttm=datetime.now(timezone.utc).replace(tzinfo=None)
@@ -189,11 +183,11 @@ class NexusStatusProvider:
                     session.add(job_status)
                     session.flush() # Get the btch_nbr (id)
                 else:
-                    # 🟢 Self-Healing: If parent exists but is generic, update it with discovery data
-                    if job_nm and job_nm != "__ASSET_JOB":
-                        if job_status.job_nm == "UNKNOWN" or job_status.job_nm == "__ASSET_JOB":
-                             job_status.job_nm = job_nm
-                             job_status.invok_id = invok_id or job_status.invok_id
+                    # Sync any discovery data if the parent was a placeholder
+                    if job_nm:
+                        job_status.job_nm = job_nm
+                    if invok_id:
+                        job_status.invok_id = invok_id
                 
                 asset_status = ETLAssetStatus(
                     btch_nbr=job_status.btch_nbr,
