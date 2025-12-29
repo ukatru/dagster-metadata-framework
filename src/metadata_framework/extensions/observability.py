@@ -147,6 +147,7 @@ class NexusObservability:
             run_id = context.run_id
             asset_nm = name
             
+            tags = context.run.tags if hasattr(context, "run") else {}
             logical_job_nm = tags.get("job_nm") or context.job_name or "UNKNOWN_JOB"
             
             # 🟢 Step 3.3.3: Capture high-fidelity config snapshots
