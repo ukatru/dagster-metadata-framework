@@ -23,6 +23,7 @@ class ETLConnection(Base, AuditMixin):
     id = Column(Integer, primary_key=True)
     conn_nm = Column(String(255), unique=True, nullable=False)
     conn_type = Column(String(50), nullable=False)
+    config_json = Column(JSONB, nullable=False, default={})
     # Removing legacy created_at in favor of AuditMixin
 
 class ETLSchedule(Base, AuditMixin):
@@ -82,6 +83,18 @@ class ETLParamsSchema(Base, AuditMixin):
     schema_json = Column(JSONB, nullable=False)
     description = Column(Text)
     is_strict = Column(Boolean, default=False)
+
+class ETLConnTypeSchema(Base, AuditMixin):
+    """
+    Connection Type Schema Registry.
+    Stores the expected configuration schema for each connection type (S3, SFTP, etc).
+    """
+    __tablename__ = "etl_conn_type_schema"
+    
+    id = Column(Integer, primary_key=True)
+    conn_type = Column(String(50), unique=True, nullable=False)
+    schema_json = Column(JSONB, nullable=False)
+    description = Column(Text)
 
 class ETLJobStatus(Base, AuditMixin):
     __tablename__ = "etl_job_status"
