@@ -124,3 +124,39 @@ class ETLAssetStatus(Base, AuditMixin):
     asset_sts_cd = Column(CHAR(1), default='R') # R, C, A
     err_msg_txt = Column(Text)
     # Audit columns are now provided by Mixin
+
+class ETLRole(Base, AuditMixin):
+    """
+    Role Registry.
+    Defines the permission tiers: DPE_PLATFORM_ADMIN, DPE_DEVELOPER, DPE_DATA_ANALYST.
+    """
+    __tablename__ = "etl_role"
+    
+    id = Column(Integer, primary_key=True)
+    role_nm = Column(String(100), unique=True, nullable=False)
+    description = Column(String(255))
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    users = relationship("ETLUser", back_populates="role")
+
+class ETLUser(Base, AuditMixin):
+    """
+    User Registry.
+    Stores identities and secure credential hashes.
+    """
+    __tablename__ = "etl_user"
+    
+    id = Column(Integer, primary_key=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)  # Salted bcrypt hash
+    full_nm = Column(String(255), nullable=False)
+    email = Column(String(255))
+    
+    # FK to role
+    role_id = Column(Integer, ForeignKey("etl_role.id"), nullable=False)
+    
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    role = relationship("ETLRole", back_populates="users")
