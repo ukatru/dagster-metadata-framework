@@ -403,10 +403,10 @@ class ParamsDagsterFactory(DagsterFactory):
                     shorthand = j_conf.get("params_schema")
                     if job_nm and shorthand:
                         try:
-                            schema_json = self._parse_shorthand(shorthand)
+                            json_schema = self._parse_shorthand(shorthand)
                             provider.upsert_params_schema(
                                 job_nm=job_nm,
-                                schema_json=schema_json,
+                                json_schema=json_schema,
                                 description=j_conf.get("description"),
                                 is_strict=j_conf.get("is_strict", False),
                                 by_nm="ParamsDagsterFactory.Sync"

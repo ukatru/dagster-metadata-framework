@@ -143,7 +143,7 @@ class JobParamsProvider:
     def upsert_params_schema(
         self, 
         job_nm: str, 
-        schema_json: Dict[str, Any], 
+        json_schema: Dict[str, Any], 
         description: Optional[str] = None,
         is_strict: bool = False,
         by_nm: str = "ParamsDagsterFactory.Sync"
@@ -157,18 +157,18 @@ class JobParamsProvider:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO etl_params_schema 
-                        (job_nm, schema_json, description, is_strict, creat_by_nm, creat_dttm, updt_by_nm, updt_dttm)
+                                (job_nm, json_schema, description, is_strict, creat_by_nm, creat_dttm, updt_by_nm, updt_dttm)
                     VALUES 
                         (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (job_nm) DO UPDATE SET
-                        schema_json = EXCLUDED.schema_json,
+                        json_schema = EXCLUDED.json_schema,
                         description = EXCLUDED.description,
                         is_strict = EXCLUDED.is_strict,
                         updt_by_nm = EXCLUDED.creat_by_nm,
                         updt_dttm = EXCLUDED.creat_dttm
                 """, (
                     job_nm, 
-                    psycopg2.extras.Json(schema_json), 
+                    psycopg2.extras.Json(json_schema), 
                     description, 
                     is_strict, 
                     by_nm, 

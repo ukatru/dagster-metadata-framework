@@ -102,7 +102,7 @@ def seed():
             if not existing:
                 db_schema = models.ETLConnTypeSchema(
                     conn_type=ctype,
-                    schema_json=sjson,
+                    json_schema=sjson,
                     description=f"Standard schema for {ctype} connections",
                     creat_by_nm="SYSTEM"
                 )

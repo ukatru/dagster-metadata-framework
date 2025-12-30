@@ -80,7 +80,7 @@ class ETLParamsSchema(Base, AuditMixin):
     
     id = Column(Integer, primary_key=True)
     job_nm = Column(String(255), unique=True, nullable=False)
-    schema_json = Column(JSONB, nullable=False)
+    json_schema = Column(JSONB, nullable=False)
     description = Column(Text)
     is_strict = Column(Boolean, default=False)
 
@@ -93,7 +93,7 @@ class ETLConnTypeSchema(Base, AuditMixin):
     
     id = Column(Integer, primary_key=True)
     conn_type = Column(String(50), unique=True, nullable=False)
-    schema_json = Column(JSONB, nullable=False)
+    json_schema = Column(JSONB, nullable=False)
     description = Column(Text)
 
 class ETLJobStatus(Base, AuditMixin):
