@@ -17,6 +17,69 @@ class AuditMixin:
     updt_by_nm = Column(String(100))
     updt_dttm = Column(DateTime, onupdate=datetime.utcnow)
 
+class ETLOrg(Base, AuditMixin):
+    """
+    Organization (Tenant) Registry.
+    The primary isolation boundary for SaaS multi-tenancy.
+    """
+    __tablename__ = "etl_org"
+    id = Column(Integer, primary_key=True)
+    org_nm = Column(String(100), unique=True, nullable=False) # e.g. "Enterprise Data Services"
+    org_code = Column(String(20), unique=True, nullable=False)  # e.g. "EDS"
+    description = Column(String(255))
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    users = relationship("ETLUser", back_populates="org")
+    teams = relationship("ETLTeam", back_populates="org")
+    jobs = relationship("ETLJob", back_populates="org")
+    connections = relationship("ETLConnection", back_populates="org")
+    job_statuses = relationship("ETLJobStatus", back_populates="org")
+
+class ETLTeam(Base, AuditMixin):
+    """
+    Team (Business Unit) Registry.
+    Scoped within an Organization.
+    """
+    __tablename__ = "etl_team"
+    id = Column(Integer, primary_key=True)
+    org_id = Column(Integer, ForeignKey("etl_org.id"), nullable=False)
+    team_nm = Column(String(100), nullable=False)
+    description = Column(String(255))
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    org = relationship("ETLOrg", back_populates="teams")
+    code_locations = relationship("ETLCodeLocation", back_populates="team")
+    jobs = relationship("ETLJob", back_populates="team")
+    connections = relationship("ETLConnection", back_populates="team")
+    job_statuses = relationship("ETLJobStatus", back_populates="team")
+    roles = relationship("ETLRole", back_populates="team")
+    memberships = relationship("ETLTeamMember", back_populates="team")
+
+    __table_args__ = (
+        UniqueConstraint("org_id", "team_nm", name="uq_org_team"),
+    )
+
+class ETLCodeLocation(Base, AuditMixin):
+    """
+    Code Location (Repository) Registry.
+    A specific project/repo scoped within a Team.
+    """
+    __tablename__ = "etl_code_location"
+    id = Column(Integer, primary_key=True)
+    team_id = Column(Integer, ForeignKey("etl_team.id"), nullable=False)
+    location_nm = Column(String(100), nullable=False)
+    repo_url = Column(String(255))
+    
+    # Relationships
+    team = relationship("ETLTeam", back_populates="code_locations")
+    jobs = relationship("ETLJob", back_populates="code_location")
+
+    __table_args__ = (
+        UniqueConstraint("team_id", "location_nm", name="uq_team_location"),
+    )
+
 class ETLConnection(Base, AuditMixin):
     __tablename__ = "etl_connection"
     
@@ -24,16 +87,32 @@ class ETLConnection(Base, AuditMixin):
     conn_nm = Column(String(255), unique=True, nullable=False)
     conn_type = Column(String(50), nullable=False)
     config_json = Column(JSONB, nullable=False, default={})
+    
+    # Scoping for Service Account Isolation
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
+    owner_type = Column(String(20)) # 'TEAM', 'CODE_LOC'
+    owner_id = Column(Integer)
+    
+    # Relationships
+    org = relationship("ETLOrg", back_populates="connections")
+    team = relationship("ETLTeam", back_populates="connections")
     # Removing legacy created_at in favor of AuditMixin
 
 class ETLSchedule(Base, AuditMixin):
     __tablename__ = "etl_schedule"
     
     id = Column(Integer, primary_key=True)
+    org_id = Column(Integer, ForeignKey("etl_org.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
     slug = Column(String(255), unique=True, nullable=False)
     cron = Column(String(100), nullable=False)
     timezone = Column(String(100))
     actv_ind = Column(Boolean, default=True)
+    
+    # Relationships
+    org = relationship("ETLOrg")
+    team = relationship("ETLTeam")
     # Removing legacy created_at in favor of AuditMixin
 
 class ETLJob(Base, AuditMixin):
@@ -42,8 +121,17 @@ class ETLJob(Base, AuditMixin):
     id = Column(Integer, primary_key=True)
     job_nm = Column(String(255), nullable=False)
     invok_id = Column(String(255), nullable=False)
-    source_conn_nm = Column(String(255), ForeignKey("etl_connection.conn_nm"))
-    target_conn_nm = Column(String(255), ForeignKey("etl_connection.conn_nm"))
+    
+    # Scoping
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
+    code_location_id = Column(Integer, ForeignKey("etl_code_location.id"))
+    
+    # Relationships
+    org = relationship("ETLOrg", back_populates="jobs")
+    team = relationship("ETLTeam", back_populates="jobs")
+    code_location = relationship("ETLCodeLocation", back_populates="jobs")
+    
     schedule_id = Column(Integer, ForeignKey("etl_schedule.id")) # Linked to centralized schedule
     cron_schedule = Column(String(100)) # Legacy, will be deprecated
     partition_start_dt = Column(Date)
@@ -79,10 +167,22 @@ class ETLParamsSchema(Base, AuditMixin):
     __tablename__ = "etl_params_schema"
     
     id = Column(Integer, primary_key=True)
-    job_nm = Column(String(255), unique=True, nullable=False)
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
+    code_location_id = Column(Integer, ForeignKey("etl_code_location.id"))
+    job_nm = Column(String(255), nullable=False)
     json_schema = Column(JSONB, nullable=False)
     description = Column(Text)
     is_strict = Column(Boolean, default=False)
+
+    # Relationships
+    org = relationship("ETLOrg")
+    team = relationship("ETLTeam")
+    code_location = relationship("ETLCodeLocation")
+
+    __table_args__ = (
+        UniqueConstraint("job_nm", "team_id", "code_location_id", name="uq_job_team_location_schema"),
+    )
 
 class ETLConnTypeSchema(Base, AuditMixin):
     """
@@ -101,12 +201,18 @@ class ETLJobStatus(Base, AuditMixin):
     
     btch_nbr = Column(BigInteger, primary_key=True, autoincrement=True)
     run_id = Column(String(64), unique=True, nullable=False)
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
     job_nm = Column(String(256), nullable=False)
     invok_id = Column(String(255))
     strt_dttm = Column(DateTime, default=datetime.utcnow)
     end_dttm = Column(DateTime)
     btch_sts_cd = Column(CHAR(1), default='R') # R, C, A
     run_mde_txt = Column(String(50), nullable=False) # SCHEDULED, MANUAL, BACKFILL
+    
+    # Relationships
+    org = relationship("ETLOrg", back_populates="job_statuses")
+    team = relationship("ETLTeam", back_populates="job_statuses")
     # Audit columns are now provided by Mixin
 
 class ETLAssetStatus(Base, AuditMixin):
@@ -133,12 +239,19 @@ class ETLRole(Base, AuditMixin):
     __tablename__ = "etl_role"
     
     id = Column(Integer, primary_key=True)
-    role_nm = Column(String(100), unique=True, nullable=False)
+    team_id = Column(Integer, ForeignKey("etl_team.id")) # Scoped to a team, or NULL for global/org roles
+    role_nm = Column(String(100), nullable=False)
     description = Column(String(255))
     actv_ind = Column(Boolean, default=True)
 
+    # Scoped roles should be unique per team
+    __table_args__ = (
+        UniqueConstraint("team_id", "role_nm", name="uq_team_role"),
+    )
+
     # Relationships
-    users = relationship("ETLUser", back_populates="role")
+    team = relationship("ETLTeam", back_populates="roles")
+    users = relationship("ETLUser", secondary="etl_team_member", back_populates="team_roles")
 
 class ETLUser(Base, AuditMixin):
     """
@@ -153,10 +266,38 @@ class ETLUser(Base, AuditMixin):
     full_nm = Column(String(255), nullable=False)
     email = Column(String(255))
     
-    # FK to role
+    # FKs
     role_id = Column(Integer, ForeignKey("etl_role.id"), nullable=False)
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    default_team_id = Column(Integer, ForeignKey("etl_team.id"))
     
     actv_ind = Column(Boolean, default=True)
 
     # Relationships
-    role = relationship("ETLRole", back_populates="users")
+    role = relationship("ETLRole", back_populates="users", overlaps="team_roles")
+    org = relationship("ETLOrg", back_populates="users")
+    team_memberships = relationship("ETLTeamMember", back_populates="user")
+    team_roles = relationship("ETLRole", secondary="etl_team_member", back_populates="users", overlaps="role")
+
+class ETLTeamMember(Base, AuditMixin):
+    """
+    Join table for User-Team-Role mapping.
+    Enables a user to have different roles in different teams.
+    """
+    __tablename__ = "etl_team_member"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("etl_user.id", ondelete="CASCADE"), nullable=False)
+    team_id = Column(Integer, ForeignKey("etl_team.id", ondelete="CASCADE"), nullable=False)
+    role_id = Column(Integer, ForeignKey("etl_role.id"), nullable=False)
+    
+    actv_ind = Column(Boolean, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "team_id", name="uq_user_team"),
+    )
+
+    # Relationships
+    user = relationship("ETLUser", back_populates="team_memberships")
+    team = relationship("ETLTeam", back_populates="memberships")
+    role = relationship("ETLRole")
