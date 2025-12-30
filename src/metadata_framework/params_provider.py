@@ -1,5 +1,7 @@
 import os
 import psycopg2
+import psycopg2.extras
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
@@ -137,3 +139,43 @@ class JobParamsProvider:
             conn.close()
             
         return list(schedules.values())
+
+    def upsert_params_schema(
+        self, 
+        job_nm: str, 
+        schema_json: Dict[str, Any], 
+        description: Optional[str] = None,
+        is_strict: bool = False,
+        by_nm: str = "ParamsDagsterFactory.Sync"
+    ):
+        """
+        Upserts a developer contract (params schema) into the database.
+        Uses explicit attribution for the audit trail.
+        """
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO etl_params_schema 
+                        (job_nm, schema_json, description, is_strict, creat_by_nm, creat_dttm, updt_by_nm, updt_dttm)
+                    VALUES 
+                        (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (job_nm) DO UPDATE SET
+                        schema_json = EXCLUDED.schema_json,
+                        description = EXCLUDED.description,
+                        is_strict = EXCLUDED.is_strict,
+                        updt_by_nm = EXCLUDED.creat_by_nm,
+                        updt_dttm = EXCLUDED.creat_dttm
+                """, (
+                    job_nm, 
+                    psycopg2.extras.Json(schema_json), 
+                    description, 
+                    is_strict, 
+                    by_nm, 
+                    datetime.utcnow(),
+                    by_nm,
+                    datetime.utcnow()
+                ))
+            conn.commit()
+        finally:
+            conn.close()
