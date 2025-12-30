@@ -50,17 +50,8 @@ class ParamsAssetFactory(AssetFactory):
         invok_id = run_tags.get("invok_id")
         job_nm = run_tags.get("job_nm") or (context.job_name if hasattr(context, "job_name") else None)
         
-        if invok_id:
-            context.log.info(f"🔍 Loading parameters for Invok: {invok_id} (Job: {job_nm})")
-            provider = JobParamsProvider(self.base_dir)
-            params = provider.get_job_params(job_nm, invok_id)
-            if params:
-                context.log.info(f"✅ Successfully loaded {len(params)} parameters into run context.")
-            template_vars["params"].update(params)
-        
-        # 🟢 Priority 2: UI Overrides (extracted from Run Config)
-        # We read directly from the run_config dictionary to avoid needing 
-        # mandatory resource requirements on every asset.
+        # 🟢 Priority 1: UI Overrides (extracted from Run Config)
+        # These are initially pre-populated with YAML defaults for UI discovery.
         try:
             run_config = context.run.run_config if hasattr(context, "run") else {}
             # Check for resource-based config (most common for discovery)
@@ -74,6 +65,16 @@ class ParamsAssetFactory(AssetFactory):
                  template_vars["params"].update(direct_params)
         except Exception:
             pass
+
+        # 🟢 Priority 2: Database Overrides (Active Audit Contract)
+        # If an invok_id is present, the database is the source of truth.
+        if invok_id:
+            context.log.info(f"🔍 Loading parameters for Invok: {invok_id} (Job: {job_nm})")
+            provider = JobParamsProvider(self.base_dir)
+            db_params = provider.get_job_params(job_nm, invok_id)
+            if db_params:
+                context.log.info(f"✅ Successfully loaded {len(db_params)} parameters from DB (overwriting UI defaults).")
+                template_vars["params"].update(db_params)
             
         return template_vars
 
