@@ -336,8 +336,13 @@ class ParamsDagsterFactory(DagsterFactory):
         Phase 2: Robust Transformation Phase.
         Applies DB-driven overrides using whole-repo topological awareness.
         """
-        # 🟢 Phase 0: Sync Params Schemas (Developer Contract)
-        self._sync_params_schemas(all_configs)
+        # 🟢 Phase 0: Metadata/Registry Sync
+        sync_enabled = os.getenv("NEXUS_SYNC_ENABLED", "TRUE").upper() == "TRUE"
+        if sync_enabled:
+            # Sync Params Schemas (Legacy)
+            self._sync_params_schemas(all_configs)
+            # Sync Whole YAML Definitions (Modern Registry)
+            self._sync_job_definitions(all_configs)
 
         provider = JobParamsProvider(self.base_dir)
         try:
@@ -460,6 +465,57 @@ class ParamsDagsterFactory(DagsterFactory):
                 except (ValueError, IndexError): pass
             if p_conf.get("type") == "cron":
                 p_conf["cron_schedule"] = cron_str
+
+    def _sync_job_definitions(self, all_configs: list):
+        """
+        Syncs all YAML definitions to the DB for UI discovery.
+        Uses MD5 hashing to prevent redundant writes.
+        """
+        import hashlib
+        provider = JobParamsProvider(self.base_dir)
+        
+        for item in all_configs:
+            config = item["config"]
+            yaml_file = item["file"]
+            
+            # Read raw content for hashing and storage
+            try:
+                with open(yaml_file, 'r') as f:
+                    raw_content = f.read()
+            except Exception: continue
+            
+            content_hash = hashlib.md5(raw_content.encode()).hexdigest()
+            
+            # Extract names per job in the file
+            jobs = config.get("jobs", [])
+            # If no jobs, look for assets and assume auto-generated jobs
+            if not jobs and "assets" in config:
+                jobs = [{"name": f"{a['name']}_job", "selection": [a['name']]} for a in config["assets"]]
+            
+            for j_conf in jobs:
+                job_nm = j_conf.get("name")
+                if not job_nm: continue
+                
+                try:
+                    # Parse schema for the job specifically
+                    params_shorthand = j_conf.get("params_schema") or config.get("params_schema")
+                    params_schema = self._parse_shorthand(params_shorthand) if params_shorthand else None
+                    
+                    provider.upsert_job_definition(
+                        job_nm=job_nm,
+                        yaml_def=config,
+                        file_loc=str(yaml_file.relative_to(self.base_dir)),
+                        file_hash=content_hash,
+                        yaml_content=raw_content,
+                        description=j_conf.get("description") or config.get("description"),
+                        params_schema=params_schema,
+                        asset_selection=j_conf.get("selection"),
+                        team_nm=self.team_nm,
+                        location_nm=self.location_name,
+                        by_nm="ParamsDagsterFactory.Sync"
+                    )
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to sync definition for {job_nm}: {e}")
 
     def _sync_params_schemas(self, all_configs: list):
         """

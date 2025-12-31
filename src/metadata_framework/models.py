@@ -33,6 +33,9 @@ class ETLOrg(Base, AuditMixin):
     users = relationship("ETLUser", back_populates="org")
     teams = relationship("ETLTeam", back_populates="org")
     jobs = relationship("ETLJob", back_populates="org")
+    job_definitions = relationship("ETLJobDefinition", back_populates="org")
+    blueprints = relationship("ETLBlueprint", back_populates="org")
+    job_instances = relationship("ETLJobInstance", back_populates="org")
     connections = relationship("ETLConnection", back_populates="org")
     job_statuses = relationship("ETLJobStatus", back_populates="org")
 
@@ -52,6 +55,9 @@ class ETLTeam(Base, AuditMixin):
     org = relationship("ETLOrg", back_populates="teams")
     code_locations = relationship("ETLCodeLocation", back_populates="team")
     jobs = relationship("ETLJob", back_populates="team")
+    job_definitions = relationship("ETLJobDefinition", back_populates="team")
+    blueprints = relationship("ETLBlueprint", back_populates="team")
+    job_instances = relationship("ETLJobInstance", back_populates="team")
     connections = relationship("ETLConnection", back_populates="team")
     job_statuses = relationship("ETLJobStatus", back_populates="team")
     roles = relationship("ETLRole", back_populates="team")
@@ -75,6 +81,8 @@ class ETLCodeLocation(Base, AuditMixin):
     # Relationships
     team = relationship("ETLTeam", back_populates="code_locations")
     jobs = relationship("ETLJob", back_populates="code_location")
+    job_definitions = relationship("ETLJobDefinition", back_populates="code_location")
+    job_instances = relationship("ETLJobInstance", back_populates="code_location")
 
     __table_args__ = (
         UniqueConstraint("team_id", "location_nm", name="uq_team_location"),
@@ -141,6 +149,111 @@ class ETLJob(Base, AuditMixin):
     __table_args__ = (
         UniqueConstraint("job_nm", "invok_id", name="uq_job_invok"),
         {"sqlite_autoincrement": True}, # For testing if needed
+    )
+
+class ETLJobDefinition(Base, AuditMixin):
+    """
+    Source Registry (The 'Template').
+    Stores the serialized YAML definition from disk.
+    """
+    __tablename__ = "etl_job_definition"
+    
+    id = Column(Integer, primary_key=True)
+    job_nm = Column(String(255), nullable=False)
+    description = Column(String(255))
+    
+    # Serialized Data (Phase 15 Expansion)
+    file_loc = Column(String(512)) # Path relative to base_dir
+    file_hash = Column(String(64)) # MD5 Hash of file content
+    yaml_content = Column(Text)    # Raw YAML string
+    yaml_def = Column(JSONB)       # Parsed JSON representation
+    params_schema = Column(JSONB)  # JSON Schema for parameters
+    asset_selection = Column(JSONB) # List of assets
+    
+    # Scoping
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
+    code_location_id = Column(Integer, ForeignKey("etl_code_location.id"))
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    org = relationship("ETLOrg", back_populates="job_definitions")
+    team = relationship("ETLTeam", back_populates="job_definitions")
+    code_location = relationship("ETLCodeLocation", back_populates="job_definitions")
+    instances = relationship("ETLJobInstance", back_populates="definition")
+
+    __table_args__ = (
+        UniqueConstraint("job_nm", "team_id", "code_location_id", name="uq_job_team_loc_def"),
+    )
+
+class ETLBlueprint(Base, AuditMixin):
+    """
+    Blueprint Registry (The 'Logic Template').
+    Stores logic-only YAMLs marked with blueprint: true.
+    """
+    __tablename__ = "etl_blueprint"
+    
+    id = Column(Integer, primary_key=True)
+    blueprint_nm = Column(String(255), nullable=False)
+    description = Column(String(255))
+    
+    # Serialized Data
+    file_loc = Column(String(512)) # Path relative to base_dir
+    file_hash = Column(String(64)) # MD5 Hash of file content
+    yaml_content = Column(Text)    # Raw YAML string
+    yaml_def = Column(JSONB)       # Parsed JSON representation (Logic only)
+    params_schema = Column(JSONB)  # JSON Schema for parameters
+    asset_selection = Column(JSONB) # List of assets
+    
+    # Scoping
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
+    code_location_id = Column(Integer, ForeignKey("etl_code_location.id"))
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    org = relationship("ETLOrg", back_populates="blueprints")
+    team = relationship("ETLTeam", back_populates="blueprints")
+    code_location = relationship("ETLCodeLocation")
+    instances = relationship("ETLJobInstance", back_populates="blueprint")
+
+    __table_args__ = (
+        UniqueConstraint("blueprint_nm", "team_id", "code_location_id", name="uq_blueprint_team_loc"),
+    )
+
+class ETLJobInstance(Base, AuditMixin):
+    """
+    Deployment Registry (The 'Actual Pipeline').
+    Stores specific runtime configurations and schedules linked to a definition.
+    """
+    __tablename__ = "etl_job_instance"
+    
+    id = Column(Integer, primary_key=True)
+    instance_id = Column(String(255), nullable=False) # Maps to invok_id in old logic
+    description = Column(String(255))
+    
+    # Links
+    job_definition_id = Column(Integer, ForeignKey("etl_job_definition.id")) # Legacy/Static
+    blueprint_id = Column(Integer, ForeignKey("etl_blueprint.id"))         # Modern Blueprint
+    schedule_id = Column(Integer, ForeignKey("etl_schedule.id"))
+    
+    # Overrides
+    cron_schedule = Column(String(100))
+    partition_start_dt = Column(Date)
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    definition = relationship("ETLJobDefinition", back_populates="instances")
+    blueprint = relationship("ETLBlueprint", back_populates="instances")
+    org = relationship("ETLOrg", back_populates="job_instances")
+    team = relationship("ETLTeam", back_populates="job_instances")
+
+    # Scoping (Denormalized for easy lookup)
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
+
+    __table_args__ = (
+        UniqueConstraint("instance_id", "job_definition_id", name="uq_inst_def"),
     )
 
 class ETLJobParameter(Base, AuditMixin):

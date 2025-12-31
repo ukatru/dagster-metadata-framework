@@ -3,7 +3,7 @@ import psycopg2
 import psycopg2.extras
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
 
 class JobParamsProvider:
@@ -163,6 +163,87 @@ class JobParamsProvider:
             conn.close()
             
         return list(schedules.values())
+
+    def upsert_job_definition(
+        self,
+        job_nm: str,
+        yaml_def: Dict[str, Any],
+        file_loc: str,
+        file_hash: str,
+        yaml_content: str,
+        description: Optional[str] = None,
+        params_schema: Optional[Dict[str, Any]] = None,
+        asset_selection: Optional[List[str]] = None,
+        team_nm: Optional[str] = None,
+        location_nm: Optional[str] = None,
+        by_nm: str = "ParamsDagsterFactory.Sync"
+    ):
+        """
+        Upserts a job definition (The Template) into the database.
+        Includes serialized content and hash for change detection.
+        """
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                # 🟢 Resolve scoping IDs (Team, Org, Code Location)
+                team_id = None
+                org_id = None
+                if team_nm:
+                    cur.execute("SELECT id, org_id FROM etl_team WHERE team_nm = %s", (team_nm,))
+                    row = cur.fetchone()
+                    if row:
+                        team_id, org_id = row
+                
+                code_location_id = None
+                if location_nm and team_id:
+                    cur.execute(
+                        "SELECT id FROM etl_code_location WHERE team_id = %s AND location_nm = %s", 
+                        (team_id, location_nm)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        code_location_id = row[0]
+
+                cur.execute("""
+                    INSERT INTO etl_job_definition 
+                                (job_nm, yaml_def, file_loc, file_hash, yaml_content, 
+                                 description, params_schema, asset_selection, 
+                                 team_id, org_id, code_location_id, actv_ind,
+                                 creat_by_nm, creat_dttm, updt_by_nm, updt_dttm)
+                    VALUES 
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s, %s)
+                    ON CONFLICT (job_nm, team_id, code_location_id) DO UPDATE SET
+                        yaml_def = EXCLUDED.yaml_def,
+                        file_loc = EXCLUDED.file_loc,
+                        file_hash = EXCLUDED.file_hash,
+                        yaml_content = EXCLUDED.yaml_content,
+                        description = EXCLUDED.description,
+                        params_schema = EXCLUDED.params_schema,
+                        asset_selection = EXCLUDED.asset_selection,
+                        actv_ind = TRUE,
+                        updt_by_nm = EXCLUDED.creat_by_nm,
+                        updt_dttm = EXCLUDED.creat_dttm
+                    RETURNING id
+                """, (
+                    job_nm, 
+                    psycopg2.extras.Json(yaml_def),
+                    file_loc,
+                    file_hash,
+                    yaml_content,
+                    description,
+                    psycopg2.extras.Json(params_schema) if params_schema else None,
+                    psycopg2.extras.Json(asset_selection) if asset_selection else None,
+                    team_id,
+                    org_id,
+                    code_location_id,
+                    by_nm, 
+                    datetime.utcnow(),
+                    by_nm,
+                    datetime.utcnow()
+                ))
+            conn.commit()
+        finally:
+            conn.close()
 
     def upsert_params_schema(
         self, 
