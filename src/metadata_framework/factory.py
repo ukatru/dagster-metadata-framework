@@ -22,7 +22,47 @@ from dagster_dag_factory.factory.job_factory import JobFactory
 from pydantic import create_model
 
 class ParamsAssetFactory(AssetFactory):
+    def __init__(self, base_dir: Path, location_name: Optional[str] = None):
+        super().__init__(base_dir)
+        self.location_name = location_name
+    
     def _create_asset(self, config: Dict[str, Any]) -> List[Any]:
+        # 🟢 Asset Namespacing: Prefix with location to prevent collisions
+        original_name = config['name']
+        
+        # Build namespaced key segments
+        if self.location_name:
+            # Sanitize location name (Dagster only allows alphanumeric + underscore)
+            safe_location = self.location_name.replace('-', '_')
+            config['_original_name'] = original_name
+            config['name'] = f"{safe_location}__{original_name}"
+            
+            # Also namespace dependencies (ins and deps)
+            if 'ins' in config:
+                namespaced_ins = {}
+                for alias, dep_config in config['ins'].items():
+                    # The alias itself might be the asset name that needs namespacing
+                    namespaced_alias = f"{safe_location}__{alias}"
+                    
+                    if isinstance(dep_config, dict):
+                        if 'key' in dep_config:
+                            # Explicit key specified - namespace it
+                            original_key = dep_config['key']
+                            dep_config['key'] = f"{safe_location}__{original_key}"
+                        # If no key, the alias is used as the key, which we've already namespaced
+                        namespaced_ins[namespaced_alias] = dep_config
+                    elif isinstance(dep_config, str):
+                        # Simple string reference - namespace it
+                        namespaced_ins[namespaced_alias] = f"{safe_location}__{dep_config}"
+                    else:
+                        # Empty dict {} or other - use namespaced alias
+                        namespaced_ins[namespaced_alias] = dep_config
+                        
+                config['ins'] = namespaced_ins
+            
+            if 'deps' in config:
+                config['deps'] = [f"{safe_location}__{dep}" for dep in config['deps']]
+        
         # 🟢 Inject logical job name into asset metadata for runtime discovery
         # This avoids hardcoded string checks in sensors/providers.
         if "metadata" not in config:
@@ -31,7 +71,7 @@ class ParamsAssetFactory(AssetFactory):
              config["tags"] = {}
         
         # We assume the default job name for a standalone asset is {name}_job
-        job_nm = f"{config['name']}_job"
+        job_nm = f"{original_name}_job"
         if "job_nm" not in config["metadata"]:
              config["metadata"]["job_nm"] = job_nm
         if "job_nm" not in config["tags"]:
@@ -49,7 +89,7 @@ class ParamsAssetFactory(AssetFactory):
         except Exception:
             run_tags = getattr(context, "run_tags", {})
             
-        instance_id = run_tags.get("instance_id")
+        # 🟢 Phase 18: Collapsed Architecture - job_nm is the primary identifier
         job_nm = run_tags.get("job_nm") or (context.job_name if hasattr(context, "job_name") else None)
         
         # 🟢 Priority 1: UI Overrides (extracted from Run Config)
@@ -68,23 +108,20 @@ class ParamsAssetFactory(AssetFactory):
         except Exception:
             pass
 
-        # 🟢 Priority 2: Database Overrides (Active Audit Contract)
-        # If an instance_id is present, the database is the source of truth.
-        if instance_id:
-            context.log.info(f"🔍 Loading parameters for Instance: {instance_id}")
-            # We assume the factory that created this asset is a ParamsDagsterFactory
-            # or we fetch it from the context if accessible.
-            # For now, we'll try to find the team from the run tags first.
+        # 🟢 Priority 2: Database Overrides (Collapsed Architecture)
+        # If job_nm is present, fetch params from etl_job_definition
+        if job_nm:
+            context.log.info(f"🔍 Loading parameters for Job: {job_nm}")
             team_nm = run_tags.get("team")
             
             provider = JobParamsProvider(self.base_dir)
-            db_params = provider.get_job_params(job_nm, instance_id, team_nm=team_nm)
+            db_params = provider.get_job_params_by_name(job_nm, team_nm=team_nm)
             if db_params:
                 # Mask sensitive fields for logging
                 masked_params = self._mask_sensitive_params(db_params)
                 import json
                 params_str = json.dumps(masked_params, indent=2, default=str)
-                context.log.info(f"✅ Successfully loaded {len(db_params)} parameters from DB (overwriting UI defaults):\n{params_str}")
+                context.log.info(f"✅ Successfully loaded {len(db_params)} parameters from DB (overwriting UI defaults):\\n{params_str}")
                 template_vars["params"].update(db_params)
             
         return template_vars
@@ -130,10 +167,34 @@ class ParamsJobFactory(JobFactory):
             name = job_conf["name"]
             selection = job_conf.get("selection", "*")
             
-            # 1. Standard Selection & Partition Logic (copied from base JobFactory for now, or could call super)
-            # Actually, let's just use the base logic but inject config.
+            # 🟢 Namespace job name with location for global uniqueness
+            if hasattr(self.asset_factory, 'location_name') and self.asset_factory.location_name:
+                # Sanitize location name (Dagster only allows alphanumeric + underscore)
+                safe_location = self.asset_factory.location_name.replace('-', '_')
+                namespaced_job_name = f"{safe_location}__{name}"
+            else:
+                namespaced_job_name = name
             
-            # Determine asset selection
+            # 🟢 Namespace asset selections if location_name is set
+            if hasattr(self.asset_factory, 'location_name') and self.asset_factory.location_name:
+                safe_location = self.asset_factory.location_name.replace('-', '_')
+                if isinstance(selection, list):
+                    # Namespace each asset in the list (skip special selectors)
+                    namespaced_selection = []
+                    for item in selection:
+                        # Skip special selectors: group:, tag:, key:, *, +, etc.
+                        if any(prefix in item for prefix in ['group:', 'tag:', 'key:', '*', '+']):
+                            namespaced_selection.append(item)
+                        elif not item.startswith(safe_location):
+                            namespaced_selection.append(f"{safe_location}__{item}")
+                        else:
+                            namespaced_selection.append(item)
+                    selection = namespaced_selection
+                elif isinstance(selection, str) and selection != "*" and not any(prefix in selection for prefix in ['group:', 'tag:', 'key:', '+', '*']):
+                    # Simple asset name - namespace it
+                    selection = f"{safe_location}__{selection}"
+            
+            # 1. Standard Selection & Partition Logic
             if isinstance(selection, list):
                 asset_sel = None
                 for item in selection:
@@ -227,7 +288,7 @@ class ParamsJobFactory(JobFactory):
 
             jobs.append(
                 define_asset_job(
-                    name=name,
+                    name=namespaced_job_name,
                     description=job_conf.get("description"),
                     selection=asset_sel,
                     partitions_def=partitions_def,
@@ -260,9 +321,6 @@ class ParamsDagsterFactory(DagsterFactory):
         
         self.team_nm = self.repo_metadata.get("team")
 
-        self.asset_factory = ParamsAssetFactory(self.base_dir)
-        self.job_factory = ParamsJobFactory(self.asset_factory)
-        
         # 🟢 Code Location Resolution (Phase 15)
         # Priority: 1. metadata.yaml | 2. Constructor Argument | 3. ENV Variable
         self.location_name = (
@@ -270,6 +328,16 @@ class ParamsDagsterFactory(DagsterFactory):
             location_name or 
             os.getenv("DAGSTER_LOCATION_NAME")
         )
+        
+        # Sanitize for Dagster compatibility (only alphanumeric + underscore allowed)
+        if self.location_name:
+            self.sanitized_location_name = self.location_name.replace('-', '_')
+        else:
+            self.sanitized_location_name = None
+
+        # Pass sanitized name to asset factory for namespacing
+        self.asset_factory = ParamsAssetFactory(self.base_dir, location_name=self.sanitized_location_name)
+        self.job_factory = ParamsJobFactory(self.asset_factory)
         
         if observability_enabled is not None:
             self.observability_enabled = observability_enabled
@@ -323,6 +391,9 @@ class ParamsDagsterFactory(DagsterFactory):
         resources = defs.resources or {}
         resources["params"] = params_resource
 
+        resources = defs.resources or {}
+        resources["params"] = params_resource
+
         return Definitions(
             assets=defs.assets,
             jobs=processed_jobs,
@@ -337,28 +408,65 @@ class ParamsDagsterFactory(DagsterFactory):
         Phase 2: Robust Transformation Phase.
         Applies DB-driven overrides using whole-repo topological awareness.
         """
+        print(f"🔍 _apply_overrides called with location_name={self.location_name}")
+        
         # 🟢 Phase 0: Sync Job Definitions (Unified Registry)
         self._sync_job_definitions(all_configs)
 
         provider = JobParamsProvider(self.base_dir)
         try:
-            active_schedules = provider.get_active_schedules(team_nm=self.team_nm)
-            batch_schedules = provider.get_batch_schedules(team_nm=self.team_nm)
+            # Fetch ALL job definitions from DB (not just scheduled ones)
+            job_definitions = provider.get_job_definitions(location_nm=self.location_name, team_nm=self.team_nm)
+            print(f"🔍 Fetched {len(job_definitions)} job definitions from DB")
+            
+            # Also fetch scheduled jobs for dynamic schedule creation
+            active_schedules = provider.get_active_schedules(location_nm=self.location_name, team_nm=self.team_nm)
+            print(f"🔍 Fetched {len(active_schedules)} active_schedules")
         except Exception as e:
-            print(f"⚠️ Warning: Failed to fetch dynamic schedules: {e}")
+            print(f"⚠️ Warning: Failed to fetch job definitions: {e}")
+            job_definitions = []
             active_schedules = []
-            batch_schedules = []
 
-        if not active_schedules and not batch_schedules:
+        # 🟢 Namespace sensor and schedule job references (MUST run before early return!)
+        if self.sanitized_location_name:
+            safe_location = self.sanitized_location_name
+            sensor_count = sum(1 for item in all_configs if "sensors" in item.get("config", {}))
+            print(f"🔍 Found {sensor_count} configs with sensors, location_name={self.location_name}")
+            
+            for item in all_configs:
+                config = item.get("config", {})
+                
+                # Update sensors
+                if "sensors" in config:
+                    print(f"🔍 Processing {len(config['sensors'])} sensors from {item.get('file', 'unknown')}")
+                    for sensor in config["sensors"]:
+                        if "job" in sensor:
+                            original_job = sensor["job"]
+                            namespaced_job = f"{safe_location}__{original_job}"
+                            sensor["job"] = namespaced_job
+                            print(f"🔧 Namespaced sensor '{sensor.get('name')}' job: {original_job} → {namespaced_job}")
+                
+                # Update schedules (non-dynamic ones from YAML)
+                if "schedules" in config:
+                    for schedule in config["schedules"]:
+                        if "job" in schedule and not schedule.get("jobs"):  # Skip batch schedules
+                            original_job = schedule["job"]
+                            # Don't re-namespace if already namespaced
+                            if "__" not in original_job or not original_job.startswith(safe_location):
+                                namespaced_job = f"{safe_location}__{original_job}"
+                                schedule["job"] = namespaced_job
+                                print(f"🔧 Namespaced schedule '{schedule.get('name')}' job: {original_job} → {namespaced_job}")
+
+        if not active_schedules:
+            print(f"🔍 _apply_overrides completed (no DB schedules), returning {len(all_configs)} configs")
             return all_configs
 
-        overridden_jobs = {s['job_nm']: s for s in active_schedules}
-        
-        # Consolidate ALL jobs that are managed by the DB (either 1:1 or Batch)
-        managed_job_names = set(overridden_jobs.keys())
-        for batch in batch_schedules:
-            for job in batch["jobs"]:
-                managed_job_names.add(job["name"])
+        # Build a mapping of jobs that are overridden by the DB (singletons or instances)
+        overridden_job_names = set()
+        for s in active_schedules:
+            overridden_job_names.add(s['job_nm'])
+            if s.get('template_job_nm'):
+                overridden_job_names.add(s['template_job_nm'])
 
         # 1. Build Whole-Repo Topology (Asset -> Jobs)
         asset_to_jobs = {}
@@ -392,49 +500,48 @@ class ParamsDagsterFactory(DagsterFactory):
             if "assets" in config:
                 for a_conf in config["assets"]:
                     a_nm = a_conf.get("name")
-                    matched = (asset_to_jobs.get(a_nm, set()) | jobs_targeting_all) & managed_job_names
-                    if matched:
-                        override = overridden_jobs[sorted(list(matched))[0]]
+                    # Check if any job targeting this asset is overridden in DB
+                    related_jobs = asset_to_jobs.get(a_nm, set()) | jobs_targeting_all
+                    if related_jobs & overridden_job_names:
+                        # If the asset has a local 'cron', remove it (DB handles it)
                         a_conf.pop("cron", None)
-                        if "partitions_def" in a_conf:
-                            self._patch_partitions(a_conf["partitions_def"], override)
+                        # Note: Partition patching for instances is handled via Jinja/Params at runtime,
+                        # but we can still patch the definition if it's a singleton.
+                        # (Omitted legacy partition patching here to keep logic clean)
 
             if "jobs" in config:
                 for j_conf in config["jobs"]:
-                    if j_conf.get("name") in managed_job_names:
-                        # Priority 1: 1:1 Override (if it exists)
-                        override = overridden_jobs.get(j_conf["name"])
+                    if j_conf.get("name") in overridden_job_names:
                         j_conf.pop("cron", None)
-                        if override and "partitions_def" in j_conf:
-                            self._patch_partitions(j_conf["partitions_def"], override)
 
-            # Suppress Legacy Triggers
+            # Suppress Legacy Triggers (Schedules/Sensors in YAML that point to overridden jobs)
             if "schedules" in config:
-                config["schedules"] = [s for s in config["schedules"] if s.get("job") not in managed_job_names]
+                config["schedules"] = [s for s in config["schedules"] if s.get("job") not in overridden_job_names]
             if "sensors" in config:
-                config["sensors"] = [s for s in config["sensors"] if s.get("job") not in managed_job_names]
+                config["sensors"] = [s for s in config["sensors"] if s.get("job") not in overridden_job_names]
 
         # 3. Inject Dynamic Schedules
         dynamic_schedules = []
+        safe_location = self.sanitized_location_name or ""
+        
         for sched in active_schedules:
+            if sched.get("type") == "singleton":
+                # Regular singleton - job_nm is already namespaced in DB sync
+                target_job = sched['job_nm']
+            else:
+                # Blueprint instance - job_nm is user's instance name, needs to trigger template job
+                # template_job_nm is the logical name from YAML, needs namespacing for Dagster
+                target_job = f"{safe_location}__{sched['template_job_nm']}" if safe_location else sched['template_job_nm']
+                
             dynamic_schedules.append({
                 "name": f"{sched['job_nm']}_{sched['instance_id']}_schedule",
-                "job": sched['job_nm'],
+                "job": target_job,
                 "cron": sched['cron_schedule'],
                 "tags": {
                     "instance_id": sched['instance_id'], 
-                    "job_nm": sched['job_nm'],
+                    "job_nm": sched['job_nm'], # THIS is the Instance ID for param lookup
                     **self.repo_metadata
                 }
-            })
-
-        # Priority 2: Batch Schedules (Fan-Out)
-        for batch in batch_schedules:
-            dynamic_schedules.append({
-                "name": batch["name"],
-                "cron": batch["cron"],
-                "timezone": batch["timezone"],
-                "jobs": batch["jobs"] # 🚀 Using the new Core Lib Fan-Out Engine!
             })
 
         if dynamic_schedules:
@@ -443,6 +550,7 @@ class ParamsDagsterFactory(DagsterFactory):
                 "file": Path("METADATA_DYNAMIC_OVERRIDES.yaml")
             })
 
+        print(f"🔍 _apply_overrides completed, returning {len(all_configs)} configs")
         return all_configs
 
     def _patch_partitions(self, p_conf: dict, override: dict):
@@ -464,39 +572,75 @@ class ParamsDagsterFactory(DagsterFactory):
 
     def _sync_job_definitions(self, all_configs: list):
         """
-        Phase 17: Unified Registry Sync.
-        Iterates through all configs and syncs full job definitions to the DB.
+        Phase 18: Collapsed Registry Sync.
+        Parses YAML and routes to either Template or Definition table.
         """
         provider = JobParamsProvider(self.base_dir)
         for item in all_configs:
             config = item.get("config", {})
+            # Check for Template Flag at root
+            is_template = config.get("template", False)
+            
+            # Build a map of job_name -> cron_schedule from the schedules section
+            schedule_map = {}
+            if "schedules" in config:
+                for sched in config["schedules"]:
+                    job_name = sched.get("job")
+                    cron = sched.get("cron")
+                    if job_name and cron:
+                        schedule_map[job_name] = cron
+            
             if "jobs" in config:
                 for j_conf in config["jobs"]:
                     job_nm = j_conf.get("name")
-                    if not job_nm:
-                        continue
+                    if not job_nm: continue
                     
                     try:
                         # Extract schema if shorthand exists
                         shorthand = j_conf.get("params_schema")
                         json_schema = self._parse_shorthand(shorthand) if shorthand else {}
                         
-                        # Extract asset selection for metadata visibility
+                        # Extract asset selection
                         selection = j_conf.get("selection", "*")
                         asset_list = selection if isinstance(selection, list) else [selection]
                         
-                        provider.upsert_job_definition(
-                            job_nm=job_nm,
-                            yaml_def=config, # 🚀 Store the full file configuration for enhanced context in the UI
-                            params_schema=json_schema,
-                            asset_selection=asset_list,
-                            description=j_conf.get("description"),
-                            team_nm=self.team_nm,
-                            location_nm=self.location_name,
-                            by_nm="ParamsDagsterFactory.Sync"
-                        )
+                        # Get cron from schedule map
+                        cron_schedule = schedule_map.get(job_nm)
+                        
+                        # 🟢 Namespace job name to match runtime job names
+                        if self.sanitized_location_name:
+                            namespaced_job_nm = f"{self.sanitized_location_name}__{job_nm}"
+                        else:
+                            namespaced_job_nm = job_nm
+
+                        if is_template:
+                            # 🟢 Route to Template Table (Blueprints)
+                            provider.upsert_job_template(
+                                template_nm=job_nm,  # Templates use original name
+                                yaml_def=config,
+                                params_schema=json_schema,
+                                asset_selection=asset_list,
+                                description=j_conf.get("description"),
+                                team_nm=self.team_nm,
+                                location_nm=self.location_name,  # Use original for DB lookup
+                                by_nm="ParamsDagsterFactory.Sync"
+                            )
+                        else:
+                            # 🟢 Route to Definition Table (Executable Singletons)
+                            provider.upsert_job_definition(
+                                job_nm=namespaced_job_nm,  # Use namespaced name
+                                yaml_def=config,
+                                params_schema=json_schema,
+                                asset_selection=asset_list,
+                                description=j_conf.get("description"),
+                                cron_schedule=cron_schedule,  # Pass the extracted cron
+                                team_nm=self.team_nm,
+                                location_nm=self.location_name,
+                                is_singleton=True,
+                                by_nm="ParamsDagsterFactory.Sync"
+                            )
                     except Exception as e:
-                        print(f"⚠️ Warning: Failed to sync definition for job {job_nm}: {e}")
+                        print(f"⚠️ Warning: Failed to sync {job_nm}: {e}")
 
     def _parse_shorthand(self, shorthand: Dict[str, Any]) -> Dict[str, Any]:
         """
