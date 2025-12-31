@@ -115,6 +115,64 @@ class ETLSchedule(Base, AuditMixin):
     team = relationship("ETLTeam")
     # Removing legacy created_at in favor of AuditMixin
 
+class ETLJobDefinition(Base, AuditMixin):
+    """
+    Job Definition (The "What" - Authoritative from YAML).
+    Acts as the registry for all jobs discovered in metadata.yaml.
+    """
+    __tablename__ = "etl_job_definition"
+    
+    id = Column(Integer, primary_key=True)
+    job_nm = Column(String(255), nullable=False)
+    description = Column(String(1000))
+    yaml_def = Column(JSONB)  # The full raw/parsed YAML definition
+    params_schema = Column(JSONB)  # Merged parameter validation schema
+    asset_selection = Column(JSONB) # List of assets defined in YAML
+    
+    # Scoping
+    org_id = Column(Integer, ForeignKey("etl_org.id"))
+    team_id = Column(Integer, ForeignKey("etl_team.id"))
+    code_location_id = Column(Integer, ForeignKey("etl_code_location.id"))
+    
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    org = relationship("ETLOrg")
+    team = relationship("ETLTeam")
+    code_location = relationship("ETLCodeLocation")
+    instances = relationship("ETLJobInstance", back_populates="definition")
+
+    __table_args__ = (
+        UniqueConstraint("job_nm", "team_id", "code_location_id", name="uq_job_def_team_location"),
+    )
+
+class ETLJobInstance(Base, AuditMixin):
+    """
+    Job Instance (The "How/When" - User Configured).
+    Stores specific runtime configurations or "deployments" of a job.
+    """
+    __tablename__ = "etl_job_instance"
+    
+    id = Column(Integer, primary_key=True)
+    job_definition_id = Column(Integer, ForeignKey("etl_job_definition.id"), nullable=False)
+    instance_id = Column(String(255), nullable=False) # Renamed from invok_id
+    description = Column(String(1000))
+    
+    schedule_id = Column(Integer, ForeignKey("etl_schedule.id"))
+    cron_schedule = Column(String(100))
+    partition_start_dt = Column(Date)
+    actv_ind = Column(Boolean, default=True)
+
+    # Relationships
+    definition = relationship("ETLJobDefinition", back_populates="instances")
+    schedule = relationship("ETLSchedule")
+    parameters = relationship("ETLJobParameter", back_populates="job_instance")
+    job_statuses = relationship("ETLJobStatus", back_populates="job_instance")
+
+    __table_args__ = (
+        UniqueConstraint("job_definition_id", "instance_id", name="uq_job_instance_def_id"),
+    )
+
 class ETLJob(Base, AuditMixin):
     __tablename__ = "etl_job"
     
@@ -148,8 +206,13 @@ class ETLJobParameter(Base, AuditMixin):
     
     id = Column(Integer, primary_key=True)
     etl_job_id = Column(Integer, ForeignKey("etl_job.id", ondelete="CASCADE"), unique=True)
+    job_instance_id = Column(Integer, ForeignKey("etl_job_instance.id", ondelete="CASCADE"), unique=True) # NEW
     config_json = Column(JSONB, nullable=False, default={})
     # Removing legacy updated_at in favor of AuditMixin
+
+    # Relationships
+    job = relationship("ETLJob")
+    job_instance = relationship("ETLJobInstance", back_populates="parameters")
 
 class ETLParameter(Base, AuditMixin):
     __tablename__ = "etl_parameter"
@@ -204,7 +267,8 @@ class ETLJobStatus(Base, AuditMixin):
     org_id = Column(Integer, ForeignKey("etl_org.id"))
     team_id = Column(Integer, ForeignKey("etl_team.id"))
     job_nm = Column(String(256), nullable=False)
-    invok_id = Column(String(255))
+    invok_id = Column(String(255)) # Legacy
+    job_instance_id = Column(Integer, ForeignKey("etl_job_instance.id")) # NEW
     strt_dttm = Column(DateTime, default=datetime.utcnow)
     end_dttm = Column(DateTime)
     btch_sts_cd = Column(CHAR(1), default='R') # R, C, A
@@ -213,6 +277,7 @@ class ETLJobStatus(Base, AuditMixin):
     # Relationships
     org = relationship("ETLOrg", back_populates="job_statuses")
     team = relationship("ETLTeam", back_populates="job_statuses")
+    job_instance = relationship("ETLJobInstance", back_populates="job_statuses")
     # Audit columns are now provided by Mixin
 
 class ETLAssetStatus(Base, AuditMixin):

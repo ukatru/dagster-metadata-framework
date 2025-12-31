@@ -99,7 +99,7 @@ class NexusStatusProvider:
                     status = ETLJobStatus(
                         run_id=run_id,
                         job_nm=job_nm,
-                        invok_id=invok_id,
+                        instance_id=instance_id,
                         run_mde_txt=run_mode,
                         btch_sts_cd='R',
                         strt_dttm=actual_start
@@ -114,7 +114,7 @@ class NexusStatusProvider:
                 else:
                     # 🧩 Update stub record created by Asset if it exists
                     status.job_nm = job_nm
-                    status.invok_id = invok_id
+                    status.instance_id = instance_id
                     status.run_mde_txt = run_mode
                 # 🟢 Update start time if official sensor provides an earlier/more accurate one
                 btch_nbr = status.btch_nbr if status else None
@@ -166,16 +166,16 @@ class NexusStatusProvider:
                     logger.info(f"🌱 Nexus Observability: Creating stub job record for Run ID: {run_id}")
                     
                     resolved_job_nm = job_nm or "UNKNOWN"
-                    resolved_invok_id = "UNKNOWN"
+                    resolved_instance_id = "UNKNOWN"
                     
                     if config_json and "template_vars" in config_json:
                         tags = config_json["template_vars"].get("run_tags", {})
-                        resolved_invok_id = tags.get("invok_id", "UNKNOWN")
+                        resolved_instance_id = tags.get("instance_id", "UNKNOWN")
                     
                     job_status = ETLJobStatus(
                         run_id=run_id,
                         job_nm=resolved_job_nm,
-                        invok_id=resolved_invok_id,
+                        instance_id=resolved_instance_id,
                         run_mde_txt='MANUAL', # Default to manual, sensor will update
                         btch_sts_cd='R',
                         strt_dttm=datetime.now(timezone.utc).replace(tzinfo=None)
@@ -186,8 +186,7 @@ class NexusStatusProvider:
                     # Sync any discovery data if the parent was a placeholder
                     if job_nm:
                         job_status.job_nm = job_nm
-                    if invok_id:
-                        job_status.invok_id = invok_id
+                    # Terminology update: we don't sync invok_id here anymore as it is replaced by instance_id
                 
                 asset_status = ETLAssetStatus(
                     btch_nbr=job_status.btch_nbr,

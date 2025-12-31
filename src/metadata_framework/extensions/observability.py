@@ -34,7 +34,7 @@ def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bo
         provider = NexusStatusProvider()
         run = context.dagster_run
         tags = run.tags if hasattr(run, "tags") else {}
-        invok_id = tags.get("invok_id", "MANUAL")
+        instance_id = tags.get("instance_id", "MANUAL")
         job_nm = tags.get("job_nm") or run.job_name or "UNKNOWN_JOB"
         
         is_scheduled = any(k.startswith("dagster/schedule") for k in tags.keys())
@@ -45,7 +45,7 @@ def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bo
         
         context.log.info(f"Nexus Observability: Logging START for job={job_nm}, run_id={run.run_id}")
         try:
-            provider.log_job_start(run.run_id, job_nm, invok_id, run_mode, strt_dttm=strt_dttm)
+            provider.log_job_start(run.run_id, job_nm, instance_id, run_mode, strt_dttm=strt_dttm)
         except Exception as e:
             context.log.error(f"❌ Nexus Observability: Failed to log job start: {e}")
 
@@ -163,7 +163,11 @@ class NexusObservability:
             if isinstance(template_vars, dict):
                 for k in ["vars", "run_tags", "params", "partition_key", "trigger"]:
                     if k in template_vars:
-                        pruned_tpl_vars[k] = to_json_serializable(template_vars[k])
+                        # Standardize internal tags during snapshotting
+                        val = template_vars[k]
+                        if k == "run_tags" and isinstance(val, dict) and "invok_id" in val:
+                             val["instance_id"] = val.pop("invok_id")
+                        pruned_tpl_vars[k] = to_json_serializable(val)
 
             full_config = {
                 "source": to_json_serializable(source_config),

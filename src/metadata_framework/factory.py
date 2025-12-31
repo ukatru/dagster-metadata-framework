@@ -49,7 +49,7 @@ class ParamsAssetFactory(AssetFactory):
         except Exception:
             run_tags = getattr(context, "run_tags", {})
             
-        invok_id = run_tags.get("invok_id")
+        instance_id = run_tags.get("instance_id")
         job_nm = run_tags.get("job_nm") or (context.job_name if hasattr(context, "job_name") else None)
         
         # 🟢 Priority 1: UI Overrides (extracted from Run Config)
@@ -69,16 +69,16 @@ class ParamsAssetFactory(AssetFactory):
             pass
 
         # 🟢 Priority 2: Database Overrides (Active Audit Contract)
-        # If an invok_id is present, the database is the source of truth.
-        if invok_id:
-            context.log.info(f"🔍 Loading parameters for Invok: {invok_id}")
+        # If an instance_id is present, the database is the source of truth.
+        if instance_id:
+            context.log.info(f"🔍 Loading parameters for Instance: {instance_id}")
             # We assume the factory that created this asset is a ParamsDagsterFactory
             # or we fetch it from the context if accessible.
             # For now, we'll try to find the team from the run tags first.
             team_nm = run_tags.get("team")
             
             provider = JobParamsProvider(self.base_dir)
-            db_params = provider.get_job_params(job_nm, invok_id, team_nm=team_nm)
+            db_params = provider.get_job_params(job_nm, instance_id, team_nm=team_nm)
             if db_params:
                 # Mask sensitive fields for logging
                 masked_params = self._mask_sensitive_params(db_params)
@@ -228,6 +228,7 @@ class ParamsJobFactory(JobFactory):
             jobs.append(
                 define_asset_job(
                     name=name,
+                    description=job_conf.get("description"),
                     selection=asset_sel,
                     partitions_def=partitions_def,
                     tags=tags,
@@ -336,8 +337,8 @@ class ParamsDagsterFactory(DagsterFactory):
         Phase 2: Robust Transformation Phase.
         Applies DB-driven overrides using whole-repo topological awareness.
         """
-        # 🟢 Phase 0: Sync Params Schemas (Developer Contract)
-        self._sync_params_schemas(all_configs)
+        # 🟢 Phase 0: Sync Job Definitions (Unified Registry)
+        self._sync_job_definitions(all_configs)
 
         provider = JobParamsProvider(self.base_dir)
         try:
@@ -417,11 +418,11 @@ class ParamsDagsterFactory(DagsterFactory):
         dynamic_schedules = []
         for sched in active_schedules:
             dynamic_schedules.append({
-                "name": f"{sched['job_nm']}_{sched['invok_id']}_schedule",
+                "name": f"{sched['job_nm']}_{sched['instance_id']}_schedule",
                 "job": sched['job_nm'],
                 "cron": sched['cron_schedule'],
                 "tags": {
-                    "invok_id": sched['invok_id'], 
+                    "instance_id": sched['instance_id'], 
                     "job_nm": sched['job_nm'],
                     **self.repo_metadata
                 }
@@ -461,9 +462,10 @@ class ParamsDagsterFactory(DagsterFactory):
             if p_conf.get("type") == "cron":
                 p_conf["cron_schedule"] = cron_str
 
-    def _sync_params_schemas(self, all_configs: list):
+    def _sync_job_definitions(self, all_configs: list):
         """
-        Iterates through all configs and syncs job-level params_schema to the DB.
+        Phase 17: Unified Registry Sync.
+        Iterates through all configs and syncs full job definitions to the DB.
         """
         provider = JobParamsProvider(self.base_dir)
         for item in all_configs:
@@ -471,21 +473,30 @@ class ParamsDagsterFactory(DagsterFactory):
             if "jobs" in config:
                 for j_conf in config["jobs"]:
                     job_nm = j_conf.get("name")
-                    shorthand = j_conf.get("params_schema")
-                    if job_nm and shorthand:
-                        try:
-                            json_schema = self._parse_shorthand(shorthand)
-                            provider.upsert_params_schema(
-                                job_nm=job_nm,
-                                json_schema=json_schema,
-                                description=j_conf.get("description"),
-                                is_strict=j_conf.get("is_strict", False),
-                                team_nm=self.team_nm,
-                                location_nm=self.location_name,
-                                by_nm="ParamsDagsterFactory.Sync"
-                            )
-                        except Exception as e:
-                            print(f"⚠️ Warning: Failed to sync schema for job {job_nm}: {e}")
+                    if not job_nm:
+                        continue
+                    
+                    try:
+                        # Extract schema if shorthand exists
+                        shorthand = j_conf.get("params_schema")
+                        json_schema = self._parse_shorthand(shorthand) if shorthand else {}
+                        
+                        # Extract asset selection for metadata visibility
+                        selection = j_conf.get("selection", "*")
+                        asset_list = selection if isinstance(selection, list) else [selection]
+                        
+                        provider.upsert_job_definition(
+                            job_nm=job_nm,
+                            yaml_def=config, # 🚀 Store the full file configuration for enhanced context in the UI
+                            params_schema=json_schema,
+                            asset_selection=asset_list,
+                            description=j_conf.get("description"),
+                            team_nm=self.team_nm,
+                            location_nm=self.location_name,
+                            by_nm="ParamsDagsterFactory.Sync"
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Warning: Failed to sync definition for job {job_nm}: {e}")
 
     def _parse_shorthand(self, shorthand: Dict[str, Any]) -> Dict[str, Any]:
         """
