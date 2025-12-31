@@ -1,5 +1,7 @@
 from typing import Dict, Any, List, Optional
 from pathlib import Path
+import yaml
+import os
 from dagster_dag_factory.factory.asset_factory import AssetFactory
 from dagster_dag_factory.factory.dagster_factory import DagsterFactory
 from .params_provider import JobParamsProvider
@@ -69,14 +71,47 @@ class ParamsAssetFactory(AssetFactory):
         # 🟢 Priority 2: Database Overrides (Active Audit Contract)
         # If an invok_id is present, the database is the source of truth.
         if invok_id:
-            context.log.info(f"🔍 Loading parameters for Invok: {invok_id} (Job: {job_nm})")
+            context.log.info(f"🔍 Loading parameters for Invok: {invok_id}")
+            # We assume the factory that created this asset is a ParamsDagsterFactory
+            # or we fetch it from the context if accessible.
+            # For now, we'll try to find the team from the run tags first.
+            team_nm = run_tags.get("team")
+            
             provider = JobParamsProvider(self.base_dir)
-            db_params = provider.get_job_params(job_nm, invok_id)
+            db_params = provider.get_job_params(job_nm, invok_id, team_nm=team_nm)
             if db_params:
-                context.log.info(f"✅ Successfully loaded {len(db_params)} parameters from DB (overwriting UI defaults).")
+                # Mask sensitive fields for logging
+                masked_params = self._mask_sensitive_params(db_params)
+                import json
+                params_str = json.dumps(masked_params, indent=2, default=str)
+                context.log.info(f"✅ Successfully loaded {len(db_params)} parameters from DB (overwriting UI defaults):\n{params_str}")
                 template_vars["params"].update(db_params)
             
         return template_vars
+    
+    def _mask_sensitive_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Mask sensitive parameter values for logging.
+        Sensitive fields include: password, token, secret, key, credential, api_key, etc.
+        """
+        sensitive_keywords = ['password', 'passwd', 'pwd', 'token', 'secret', 'key', 'credential', 'api_key', 'auth']
+        masked = {}
+        
+        for key, value in params.items():
+            key_lower = key.lower()
+            # Check if key contains any sensitive keyword
+            is_sensitive = any(keyword in key_lower for keyword in sensitive_keywords)
+            
+            if is_sensitive and value:
+                # Mask the value
+                if isinstance(value, str) and len(value) > 4:
+                    masked[key] = f"{value[:2]}***{value[-2:]}"
+                else:
+                    masked[key] = "***"
+            else:
+                masked[key] = value
+        
+        return masked
 
     def _wrap_operator(self, operator: Any, asset_conf: Dict[str, Any]) -> Any:
         from .extensions.observability import NexusObservability
@@ -125,6 +160,16 @@ class ParamsJobFactory(JobFactory):
                     break
 
             tags = job_conf.get("tags") or {}
+            
+            # 🟢 Inject Team/Org Context into Job Tags
+            if hasattr(self.asset_factory, "dagster_factory"): # Assume we might attach it later or refactor
+                 pass # Placeholder for more decoupling
+            
+            # For now, let's assume we can pass the repo_metadata down
+            if hasattr(self, "repo_metadata"):
+                for k, v in self.repo_metadata.items():
+                    if k not in tags:
+                        tags[k] = v
 
             # 2. 🟢 Dynamic RunConfig Generation (Developer Contract in UI)
             shorthand = job_conf.get("params_schema")
@@ -201,13 +246,29 @@ class ParamsDagsterFactory(DagsterFactory):
         **kwargs
     ):
         super().__init__(base_dir, **kwargs)
-        import os
         
+        # 🟢 Hierarchical Metadata Loading (Phase 15)
+        self.repo_metadata = {}
+        metadata_path = self.base_dir / "metadata.yaml"
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, 'r') as f:
+                    self.repo_metadata = yaml.safe_load(f) or {}
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to load metadata.yaml: {e}")
+        
+        self.team_nm = self.repo_metadata.get("team")
+
         self.asset_factory = ParamsAssetFactory(self.base_dir)
         self.job_factory = ParamsJobFactory(self.asset_factory)
         
-        # 🟢 Priority 1: Constructor Argument | Priority 2: ENV Variable | Priority 3: Default
-        self.location_name = location_name or os.getenv("DAGSTER_LOCATION_NAME")
+        # 🟢 Code Location Resolution (Phase 15)
+        # Priority: 1. metadata.yaml | 2. Constructor Argument | 3. ENV Variable
+        self.location_name = (
+            self.repo_metadata.get("code_location") or 
+            location_name or 
+            os.getenv("DAGSTER_LOCATION_NAME")
+        )
         
         if observability_enabled is not None:
             self.observability_enabled = observability_enabled
@@ -230,6 +291,12 @@ class ParamsDagsterFactory(DagsterFactory):
                 tags = job.tags or {}
                 if "job_nm" not in tags:
                     tags = {**tags, "job_nm": job.name}
+                
+                # Injection from repo metadata (moved from JobFactory for global catch-all)
+                for k, v in self.repo_metadata.items():
+                    if k not in tags:
+                        tags[k] = str(v)
+
                 processed_jobs.append(job.with_tags(tags))
             else:
                 processed_jobs.append(job)
@@ -274,8 +341,8 @@ class ParamsDagsterFactory(DagsterFactory):
 
         provider = JobParamsProvider(self.base_dir)
         try:
-            active_schedules = provider.get_active_schedules()
-            batch_schedules = provider.get_batch_schedules()
+            active_schedules = provider.get_active_schedules(team_nm=self.team_nm)
+            batch_schedules = provider.get_batch_schedules(team_nm=self.team_nm)
         except Exception as e:
             print(f"⚠️ Warning: Failed to fetch dynamic schedules: {e}")
             active_schedules = []
@@ -353,7 +420,11 @@ class ParamsDagsterFactory(DagsterFactory):
                 "name": f"{sched['job_nm']}_{sched['invok_id']}_schedule",
                 "job": sched['job_nm'],
                 "cron": sched['cron_schedule'],
-                "tags": {"invok_id": sched['invok_id'], "job_nm": sched['job_nm']}
+                "tags": {
+                    "invok_id": sched['invok_id'], 
+                    "job_nm": sched['job_nm'],
+                    **self.repo_metadata
+                }
             })
 
         # Priority 2: Batch Schedules (Fan-Out)
@@ -409,6 +480,8 @@ class ParamsDagsterFactory(DagsterFactory):
                                 json_schema=json_schema,
                                 description=j_conf.get("description"),
                                 is_strict=j_conf.get("is_strict", False),
+                                team_nm=self.team_nm,
+                                location_nm=self.location_name,
                                 by_nm="ParamsDagsterFactory.Sync"
                             )
                         except Exception as e:
