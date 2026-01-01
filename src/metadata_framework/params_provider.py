@@ -99,20 +99,50 @@ class JobParamsProvider:
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
-                sql = """
-                    SELECT b.blueprint_nm, j.instance_id, j.cron_schedule, j.partition_start_dt 
+                # 1. Fetch from Instances (Shared patterns)
+                sql_instances = """
+                    SELECT b.blueprint_nm as job_nm, j.instance_id, j.cron_schedule, j.partition_start_dt 
                     FROM etl_job_instance j
                     JOIN etl_blueprint b ON j.blueprint_id = b.id
                     JOIN etl_team t ON j.team_id = t.id
                     WHERE j.actv_ind = TRUE AND j.cron_schedule IS NOT NULL
                 """
+                
+                # 2. Fetch from Static Overrides (1:1 Jobs)
+                sql_static = """
+                    SELECT p.job_nm, 'STATIC' as instance_id, p.cron_schedule, p.partition_start_dt
+                    FROM etl_job_parameter p
+                    JOIN etl_team t ON p.team_id = t.id
+                    WHERE p.cron_schedule IS NOT NULL
+                """
+                
+                sql = f"({sql_instances}) UNION ALL ({sql_static})"
                 params_list = []
                 if team_nm:
-                    sql += " AND t.team_nm = %s"
+                    sql = f"SELECT * FROM ({sql}) as combined WHERE team_nm = %s"
+                    # Wait, team_nm is not in the select list of the subqueries. Let's fix.
+                    
+                # Refined SQL with team filtering
+                sql = """
+                    SELECT * FROM (
+                        SELECT b.blueprint_nm as job_nm, j.instance_id, j.cron_schedule, j.partition_start_dt, t.team_nm
+                        FROM etl_job_instance j
+                        JOIN etl_blueprint b ON j.blueprint_id = b.id
+                        JOIN etl_team t ON j.team_id = t.id
+                        WHERE j.actv_ind = TRUE AND j.cron_schedule IS NOT NULL
+                        UNION ALL
+                        SELECT p.job_nm, 'STATIC' as instance_id, p.cron_schedule, p.partition_start_dt, t.team_nm
+                        FROM etl_job_parameter p
+                        JOIN etl_team t ON p.team_id = t.id
+                        WHERE p.cron_schedule IS NOT NULL
+                    ) as combined
+                """
+                if team_nm:
+                    sql += " WHERE team_nm = %s"
                     params_list.append(team_nm)
                 
                 cur.execute(sql, tuple(params_list))
-                for blueprint_nm, instance_id, cron, start_dt in cur.fetchall():
+                for blueprint_nm, instance_id, cron, start_dt, t_nm in cur.fetchall():
                     schedules.append({
                         "job_nm": blueprint_nm, # The blueprint name acts as the target job
                         "instance_id": instance_id,

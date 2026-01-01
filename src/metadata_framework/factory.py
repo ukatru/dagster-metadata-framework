@@ -510,6 +510,10 @@ class ParamsDagsterFactory(DagsterFactory):
                 blueprint_nm = config.get("name") or yaml_file.stem
                 try:
                     params_shorthand = config.get("params_schema")
+                    if not params_shorthand and config.get("jobs"):
+                        # Try to find schema in the first job of the blueprint
+                        params_shorthand = config["jobs"][0].get("params_schema")
+                    
                     params_schema = self._parse_shorthand(params_shorthand) if params_shorthand else None
                     
                     # Blueprints often have a primary asset or a list of assets

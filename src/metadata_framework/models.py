@@ -33,6 +33,7 @@ class ETLOrg(Base, AuditMixin):
     users = relationship("ETLUser", back_populates="org")
     teams = relationship("ETLTeam", back_populates="org")
     blueprints = relationship("ETLBlueprint", back_populates="org")
+    job_definitions = relationship("ETLJobDefinition", back_populates="org")
     job_instances = relationship("ETLJobInstance", back_populates="org")
     connections = relationship("ETLConnection", back_populates="org")
     job_statuses = relationship("ETLJobStatus", back_populates="org")
@@ -239,6 +240,10 @@ class ETLJobParameter(Base, AuditMixin):
     org_id = Column(Integer, ForeignKey("etl_org.id"))
     team_id = Column(Integer, ForeignKey("etl_team.id"))
     config_json = Column(JSONB, nullable=False, default={})
+
+    # Overrides
+    cron_schedule = Column(String(100))
+    partition_start_dt = Column(Date)
 
     # Relationships
     org = relationship("ETLOrg")
