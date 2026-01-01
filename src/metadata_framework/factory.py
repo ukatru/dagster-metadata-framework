@@ -23,20 +23,6 @@ from pydantic import create_model
 
 class ParamsAssetFactory(AssetFactory):
     def _create_asset(self, config: Dict[str, Any]) -> List[Any]:
-        # 🟢 Inject logical job name into asset metadata for runtime discovery
-        # This avoids hardcoded string checks in sensors/providers.
-        if "metadata" not in config:
-             config["metadata"] = {}
-        if "tags" not in config:
-             config["tags"] = {}
-        
-        # We assume the default job name for a standalone asset is {name}_job
-        job_nm = f"{config['name']}_job"
-        if "job_nm" not in config["metadata"]:
-             config["metadata"]["job_nm"] = job_nm
-        if "job_nm" not in config["tags"]:
-             config["tags"]["job_nm"] = job_nm
-        
         return super()._create_asset(config)
 
     def _get_template_vars(self, context) -> Dict[str, Any]:
@@ -49,7 +35,7 @@ class ParamsAssetFactory(AssetFactory):
         except Exception:
             run_tags = getattr(context, "run_tags", {})
             
-        invok_id = run_tags.get("invok_id")
+        instance_id = run_tags.get("instance_id")
         job_nm = run_tags.get("job_nm") or (context.job_name if hasattr(context, "job_name") else None)
         
         # 🟢 Priority 1: UI Overrides (extracted from Run Config)
@@ -69,16 +55,22 @@ class ParamsAssetFactory(AssetFactory):
             pass
 
         # 🟢 Priority 2: Database Overrides (Active Audit Contract)
-        # If an invok_id is present, the database is the source of truth.
-        if invok_id:
-            context.log.info(f"🔍 Loading parameters for Invok: {invok_id}")
-            # We assume the factory that created this asset is a ParamsDagsterFactory
-            # or we fetch it from the context if accessible.
-            # For now, we'll try to find the team from the run tags first.
+        # If an instance_id is present, the database is the source of truth.
+        # We also support team-level overrides for Static jobs (no instance_id but has platform/type: static)
+        platform_type = run_tags.get("platform/type")
+        
+        if instance_id or platform_type == "static":
             team_nm = run_tags.get("team")
-            
             provider = JobParamsProvider(self.base_dir)
-            db_params = provider.get_job_params(job_nm, invok_id, team_nm=team_nm)
+            
+            # Use unified hydration logic in provider
+            db_params = provider.get_job_params(
+                job_nm=job_nm, 
+                instance_id=instance_id, 
+                team_nm=team_nm,
+                is_static=(platform_type == "static")
+            )
+            
             if db_params:
                 # Mask sensitive fields for logging
                 masked_params = self._mask_sensitive_params(db_params)
@@ -86,6 +78,10 @@ class ParamsAssetFactory(AssetFactory):
                 params_str = json.dumps(masked_params, indent=2, default=str)
                 context.log.info(f"✅ Successfully loaded {len(db_params)} parameters from DB (overwriting UI defaults):\n{params_str}")
                 template_vars["params"].update(db_params)
+            else:
+                context.log.info(f"ℹ️ No database overrides found for job='{job_nm}', instance='{instance_id}', team='{team_nm}', is_static={(platform_type == 'static')}")
+        else:
+            context.log.info(f"ℹ️ Skipping DB hydration: instance_id={instance_id}, platform_type={platform_type}")
             
         return template_vars
     
@@ -160,16 +156,6 @@ class ParamsJobFactory(JobFactory):
                     break
 
             tags = job_conf.get("tags") or {}
-            
-            # 🟢 Inject Team/Org Context into Job Tags
-            if hasattr(self.asset_factory, "dagster_factory"): # Assume we might attach it later or refactor
-                 pass # Placeholder for more decoupling
-            
-            # For now, let's assume we can pass the repo_metadata down
-            if hasattr(self, "repo_metadata"):
-                for k, v in self.repo_metadata.items():
-                    if k not in tags:
-                        tags[k] = v
 
             # 2. 🟢 Dynamic RunConfig Generation (Developer Contract in UI)
             shorthand = job_conf.get("params_schema")
@@ -281,25 +267,10 @@ class ParamsDagsterFactory(DagsterFactory):
             self.global_observability = os.getenv("NEXUS_GLOBAL_OBSERVABILITY", "FALSE").upper() == "TRUE"
 
     def build_definitions(self) -> Definitions:
-        """Injects global listeners and observability tags after core construction."""
+        """Injects global listeners and listeners after core construction."""
         defs = super().build_definitions()
         
-        # 🟢 Observability Tag Management (Framework Layer)
-        processed_jobs = []
-        for job in defs.jobs:
-            if isinstance(job, JobDefinition):
-                tags = job.tags or {}
-                if "job_nm" not in tags:
-                    tags = {**tags, "job_nm": job.name}
-                
-                # Injection from repo metadata (moved from JobFactory for global catch-all)
-                for k, v in self.repo_metadata.items():
-                    if k not in tags:
-                        tags[k] = str(v)
-
-                processed_jobs.append(job.with_tags(tags))
-            else:
-                processed_jobs.append(job)
+        # 🟢 Observability Hub Management (Namespacing & Scalability)
 
         # 🟢 Observability Hub Management (Namespacing & Scalability)
         listeners = []
@@ -324,7 +295,7 @@ class ParamsDagsterFactory(DagsterFactory):
 
         return Definitions(
             assets=defs.assets,
-            jobs=processed_jobs,
+            jobs=defs.jobs,
             schedules=defs.schedules,
             sensors=defs.sensors + listeners,
             resources=resources,
@@ -336,6 +307,9 @@ class ParamsDagsterFactory(DagsterFactory):
         Phase 2: Robust Transformation Phase.
         Applies DB-driven overrides using whole-repo topological awareness.
         """
+        # 🟢 Phase -1: Unified Enrichment
+        self._enrich_configs(all_configs)
+        
         # 🟢 Phase 0: Metadata/Registry Sync
         sync_enabled = os.getenv("NEXUS_SYNC_ENABLED", "TRUE").upper() == "TRUE"
         if sync_enabled:
@@ -422,11 +396,11 @@ class ParamsDagsterFactory(DagsterFactory):
         dynamic_schedules = []
         for sched in active_schedules:
             dynamic_schedules.append({
-                "name": f"{sched['job_nm']}_{sched['invok_id']}_schedule",
-                "job": sched['job_nm'],
+                "name": f"{sched['job_nm']}_{sched['instance_id']}_schedule",
                 "cron": sched['cron_schedule'],
+                "job": sched['job_nm'],
                 "tags": {
-                    "invok_id": sched['invok_id'], 
+                    "instance_id": sched['instance_id'], 
                     "job_nm": sched['job_nm'],
                     **self.repo_metadata
                 }
@@ -466,10 +440,55 @@ class ParamsDagsterFactory(DagsterFactory):
             if p_conf.get("type") == "cron":
                 p_conf["cron_schedule"] = cron_str
 
+    def _enrich_configs(self, all_configs: List[Dict[str, Any]]):
+        """
+        Injects platform metadata (team, org, static tags) into raw config dictionaries.
+        This ensures both Dagster instantiation and DB sync are consistent.
+        """
+        for item in all_configs:
+            config = item.get("config", {})
+            if not config: continue
+            
+            # 1. Assets
+            if "assets" in config:
+                for a_conf in config["assets"]:
+                    if "tags" not in a_conf: a_conf["tags"] = {}
+                    
+                    # Job Name for discovery
+                    if "job_nm" not in a_conf["tags"]:
+                        job_nm = f"{a_conf['name']}_job"
+                        a_conf["tags"]["job_nm"] = job_nm
+                        a_conf.setdefault("metadata", {})["job_nm"] = job_nm
+
+                    # Platform Type
+                    if "platform/type" not in a_conf["tags"]:
+                        a_conf["tags"]["platform/type"] = "static"
+                    
+                    # Repo Metadata (Team, Org) - Skip 'description' as it's not a valid tag value
+                    for k, v in self.repo_metadata.items():
+                        if k != "description" and k not in a_conf["tags"]:
+                            a_conf["tags"][k] = str(v)
+
+            # 2. Explicit Jobs
+            if "jobs" in config:
+                for j_conf in config["jobs"]:
+                    if "tags" not in j_conf: j_conf["tags"] = {}
+                    
+                    if "job_nm" not in j_conf["tags"]:
+                        j_conf["tags"]["job_nm"] = j_conf["name"]
+
+                    if "platform/type" not in j_conf["tags"] and "instance_id" not in j_conf["tags"]:
+                        j_conf["tags"]["platform/type"] = "static"
+
+                    # Repo Metadata (Team, Org) - Skip 'description' as it's not a valid tag value
+                    for k, v in self.repo_metadata.items():
+                        if k != "description" and k not in j_conf["tags"]:
+                            j_conf["tags"][k] = str(v)
+
     def _sync_job_definitions(self, all_configs: list):
         """
         Syncs all YAML definitions to the DB for UI discovery.
-        Uses MD5 hashing to prevent redundant writes.
+        Routes to ETLBlueprint if blueprint: true, otherwise to ETLJobDefinition.
         """
         import hashlib
         provider = JobParamsProvider(self.base_dir)
@@ -477,18 +496,44 @@ class ParamsDagsterFactory(DagsterFactory):
         for item in all_configs:
             config = item["config"]
             yaml_file = item["file"]
-            
             # Read raw content for hashing and storage
             try:
                 with open(yaml_file, 'r') as f:
                     raw_content = f.read()
-            except Exception: continue
+            except Exception as e: 
+                continue
             
             content_hash = hashlib.md5(raw_content.encode()).hexdigest()
             
-            # Extract names per job in the file
+            # 🟢 Route 1: Blueprint Discovery (Logic Templates)
+            if config.get("blueprint", False):
+                blueprint_nm = config.get("name") or yaml_file.stem
+                try:
+                    params_shorthand = config.get("params_schema")
+                    params_schema = self._parse_shorthand(params_shorthand) if params_shorthand else None
+                    
+                    # Blueprints often have a primary asset or a list of assets
+                    asset_selection = [a['name'] for a in config.get("assets", [])]
+                    
+                    provider.upsert_blueprint(
+                        blueprint_nm=blueprint_nm,
+                        yaml_def=config,
+                        file_loc=str(yaml_file.relative_to(self.base_dir)),
+                        file_hash=content_hash,
+                        yaml_content=raw_content,
+                        description=config.get("description"),
+                        params_schema=params_schema,
+                        asset_selection=asset_selection,
+                        team_nm=self.team_nm,
+                        location_nm=self.location_name,
+                        by_nm="ParamsDagsterFactory.Sync"
+                    )
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to sync blueprint {blueprint_nm}: {e}")
+                continue # Skip standard job sync for blueprints
+            
+            # 🟢 Route 2: Static Pipeline Discovery (Concrete Jobs)
             jobs = config.get("jobs", [])
-            # If no jobs, look for assets and assume auto-generated jobs
             if not jobs and "assets" in config:
                 jobs = [{"name": f"{a['name']}_job", "selection": [a['name']]} for a in config["assets"]]
             
@@ -497,7 +542,6 @@ class ParamsDagsterFactory(DagsterFactory):
                 if not job_nm: continue
                 
                 try:
-                    # Parse schema for the job specifically
                     params_shorthand = j_conf.get("params_schema") or config.get("params_schema")
                     params_schema = self._parse_shorthand(params_shorthand) if params_shorthand else None
                     

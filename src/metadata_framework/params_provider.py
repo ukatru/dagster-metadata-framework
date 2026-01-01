@@ -27,65 +27,64 @@ class JobParamsProvider:
             raise ValueError("POSTGRES_PASSWORD is not set in environment")
         return psycopg2.connect(**self.db_params)
 
-    def get_job_params(self, job_nm: str, invok_id: str, team_nm: Optional[str] = None) -> Dict[str, Any]:
+    def get_job_params(
+        self, 
+        job_nm: str, 
+        instance_id: Optional[str] = None, 
+        team_nm: Optional[str] = None,
+        is_static: bool = False
+    ) -> Dict[str, Any]:
         """
-        Fetches and merges job parameters.
-        Priority: Global -> Connection -> Job
+        Two-Tier Parameter Hydration.
+        Priority: Global -> Static Override (if static) -> Instance Parameter (if instance)
         """
         params = {}
-        # 🟢 Internal logic: If job_nm is generic, we fall back to invok_id only lookup.
-        # But if job_nm is specific, we MUST match both.
-        is_generic = job_nm == "__ASSET_JOB" or not job_nm
-        
         conn = self._get_connection()
         try:
-            with conn.cursor() as cur:
-                # 1. Global
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                # 1. Tier 0: Global Parameters (Catch-all defaults)
                 cur.execute("SELECT parm_nm, parm_value FROM etl_parameter")
-                for nm, val in cur.fetchall():
-                    params[nm] = val
+                for row in cur.fetchall():
+                    params[row['parm_nm']] = row['parm_value']
 
-                # 2. Job + ID
-                if is_generic:
+                # 2. Tier 1: Static Overrides (Metadata-Driven 1:1)
+                # Matches by Job Name and Team.
+                if is_static and team_nm:
                     sql = """
-                        SELECT j.id, j.job_nm 
-                        FROM etl_job j
-                        JOIN etl_team t ON j.team_id = t.id
-                        WHERE j.invok_id = %s AND j.actv_ind = TRUE
+                        SELECT p.config_json 
+                        FROM etl_job_parameter p
+                        JOIN etl_team t ON p.team_id = t.id
+                        WHERE p.job_nm = %s AND t.team_nm = %s
                     """
-                    params_list = [invok_id]
+                    cur.execute(sql, (job_nm, team_nm))
+                    row = cur.fetchone()
+                    if row:
+                        params.update(row['config_json'])
+
+                # 3. Tier 2: Instance Parameters (Blueprint Invocations 1:N)
+                # Matches by String instance_id.
+                if instance_id:
+                    sql = """
+                        SELECT p.config_json, i.id as instance_pk
+                        FROM etl_instance_parameter p
+                        JOIN etl_job_instance i ON p.instance_pk = i.id
+                        JOIN etl_team t ON i.team_id = t.id
+                        WHERE i.instance_id = %s
+                    """
+                    params_list = [instance_id]
                     if team_nm:
                         sql += " AND t.team_nm = %s"
                         params_list.append(team_nm)
-                    sql += " ORDER BY j.creat_dttm DESC LIMIT 1"
+                    
                     cur.execute(sql, tuple(params_list))
-                else:
-                    sql = """
-                        SELECT j.id, j.job_nm 
-                        FROM etl_job j
-                        JOIN etl_team t ON j.team_id = t.id
-                        WHERE j.job_nm = %s AND j.invok_id = %s AND j.actv_ind = TRUE
-                    """
-                    params_list = [job_nm, invok_id]
-                    if team_nm:
-                        sql += " AND t.team_nm = %s"
-                        params_list.append(team_nm)
-                    cur.execute(sql, tuple(params_list))
-                
-                job_row = cur.fetchone()
-                if not job_row:
-                    return params
+                    row = cur.fetchone()
+                    if row:
+                        params.update(row['config_json'])
+                        params["_instance_pk"] = row['instance_pk']
+                        params["_instance_id"] = instance_id
 
-                # We include the internal ID and Job Name in the parameters for traceability
-                job_id, final_job_nm = job_row
-                params["_job_id"] = job_id
-                params["_job_nm"] = final_job_nm
-
-                # 4. Fetch Job Specific Parameters (Highest Priority)
-                cur.execute("SELECT config_json FROM etl_job_parameter WHERE etl_job_id = %s", (job_id,))
-                job_param_row = cur.fetchone()
-                if job_param_row:
-                    params.update(job_param_row[0])
+                # Traceability
+                params["_job_nm"] = job_nm
 
         finally:
             conn.close()
@@ -101,8 +100,9 @@ class JobParamsProvider:
         try:
             with conn.cursor() as cur:
                 sql = """
-                    SELECT j.job_nm, j.invok_id, j.cron_schedule, j.partition_start_dt 
-                    FROM etl_job j
+                    SELECT b.blueprint_nm, j.instance_id, j.cron_schedule, j.partition_start_dt 
+                    FROM etl_job_instance j
+                    JOIN etl_blueprint b ON j.blueprint_id = b.id
                     JOIN etl_team t ON j.team_id = t.id
                     WHERE j.actv_ind = TRUE AND j.cron_schedule IS NOT NULL
                 """
@@ -112,10 +112,10 @@ class JobParamsProvider:
                     params_list.append(team_nm)
                 
                 cur.execute(sql, tuple(params_list))
-                for job_nm, invok_id, cron, start_dt in cur.fetchall():
+                for blueprint_nm, instance_id, cron, start_dt in cur.fetchall():
                     schedules.append({
-                        "job_nm": job_nm,
-                        "invok_id": invok_id,
+                        "job_nm": blueprint_nm, # The blueprint name acts as the target job
+                        "instance_id": instance_id,
                         "cron_schedule": cron,
                         "partition_start_dt": start_dt
                     })
@@ -134,9 +134,10 @@ class JobParamsProvider:
             with conn.cursor() as cur:
                 # 1. Fetch all active schedules and their linked active jobs in one join
                 sql = """
-                    SELECT s.slug, s.cron, s.timezone, j.job_nm, j.invok_id
+                    SELECT s.slug, s.cron, s.timezone, b.blueprint_nm, j.instance_id
                     FROM etl_schedule s
-                    JOIN etl_job j ON s.id = j.schedule_id
+                    JOIN etl_job_instance j ON s.id = j.schedule_id
+                    JOIN etl_blueprint b ON j.blueprint_id = b.id
                     JOIN etl_team t ON j.team_id = t.id
                     WHERE s.actv_ind = TRUE AND j.actv_ind = TRUE
                 """
@@ -147,7 +148,7 @@ class JobParamsProvider:
                 
                 cur.execute(sql, tuple(params_list))
                 
-                for slug, cron, tz, job_nm, invok_id in cur.fetchall():
+                for slug, cron, tz, job_nm, instance_id in cur.fetchall():
                     if slug not in schedules:
                         schedules[slug] = {
                             "name": f"nexus_heartbeat_{slug.lower()}",
@@ -157,7 +158,7 @@ class JobParamsProvider:
                         }
                     schedules[slug]["jobs"].append({
                         "name": job_nm,
-                        "tags": {"invok_id": invok_id, "job_nm": job_nm}
+                        "tags": {"instance_id": instance_id, "job_nm": job_nm}
                     })
         finally:
             conn.close()
@@ -226,6 +227,86 @@ class JobParamsProvider:
                     RETURNING id
                 """, (
                     job_nm, 
+                    psycopg2.extras.Json(yaml_def),
+                    file_loc,
+                    file_hash,
+                    yaml_content,
+                    description,
+                    psycopg2.extras.Json(params_schema) if params_schema else None,
+                    psycopg2.extras.Json(asset_selection) if asset_selection else None,
+                    team_id,
+                    org_id,
+                    code_location_id,
+                    by_nm, 
+                    datetime.utcnow(),
+                    by_nm,
+                    datetime.utcnow()
+                ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def upsert_blueprint(
+        self,
+        blueprint_nm: str,
+        yaml_def: Dict[str, Any],
+        file_loc: str,
+        file_hash: str,
+        yaml_content: str,
+        description: Optional[str] = None,
+        params_schema: Optional[Dict[str, Any]] = None,
+        asset_selection: Optional[List[str]] = None,
+        team_nm: Optional[str] = None,
+        location_nm: Optional[str] = None,
+        by_nm: str = "ParamsDagsterFactory.Sync"
+    ):
+        """
+        Upserts a Blueprint definition into the database.
+        Blueprints are logic-only templates that require an ETLJobInstance to run.
+        """
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                # 🟢 Resolve scoping IDs
+                team_id = None
+                org_id = None
+                if team_nm:
+                    cur.execute("SELECT id, org_id FROM etl_team WHERE team_nm = %s", (team_nm,))
+                    row = cur.fetchone()
+                    if row:
+                        team_id, org_id = row
+                
+                code_location_id = None
+                if location_nm and team_id:
+                    cur.execute(
+                        "SELECT id FROM etl_code_location WHERE team_id = %s AND location_nm = %s", 
+                        (team_id, location_nm)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        code_location_id = row[0]
+
+                cur.execute("""
+                    INSERT INTO etl_blueprint 
+                                (blueprint_nm, yaml_def, file_loc, file_hash, yaml_content, 
+                                 description, params_schema, asset_selection, 
+                                 team_id, org_id, code_location_id, actv_ind,
+                                 creat_by_nm, creat_dttm, updt_by_nm, updt_dttm)
+                    VALUES 
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s, %s, %s)
+                    ON CONFLICT (blueprint_nm, team_id, code_location_id) DO UPDATE SET
+                        yaml_def = EXCLUDED.yaml_def,
+                        file_loc = EXCLUDED.file_loc,
+                        file_hash = EXCLUDED.file_hash,
+                        yaml_content = EXCLUDED.yaml_content,
+                        description = EXCLUDED.description,
+                        params_schema = EXCLUDED.params_schema,
+                        asset_selection = EXCLUDED.asset_selection,
+                        actv_ind = TRUE,
+                        updt_by_nm = EXCLUDED.creat_by_nm,
+                        updt_dttm = EXCLUDED.creat_dttm
+                """, (
+                    blueprint_nm, 
                     psycopg2.extras.Json(yaml_def),
                     file_loc,
                     file_hash,
