@@ -313,9 +313,7 @@ class ParamsDagsterFactory(DagsterFactory):
         # 🟢 Phase 0: Metadata/Registry Sync
         sync_enabled = os.getenv("NEXUS_SYNC_ENABLED", "TRUE").upper() == "TRUE"
         if sync_enabled:
-            # Sync Params Schemas (Legacy)
-            self._sync_params_schemas(all_configs)
-            # Sync Whole YAML Definitions (Modern Registry)
+            # Sync Whole YAML Definitions (Modern Registry) - Handles Schmeas automatically
             self._sync_job_definitions(all_configs)
 
         provider = JobParamsProvider(self.base_dir)
@@ -488,7 +486,7 @@ class ParamsDagsterFactory(DagsterFactory):
     def _sync_job_definitions(self, all_configs: list):
         """
         Syncs all YAML definitions to the DB for UI discovery.
-        Routes to ETLBlueprint if blueprint: true, otherwise to ETLJobDefinition.
+        Everything is now routed to ETLJobDefinition with a blueprint_ind.
         """
         import hashlib
         provider = JobParamsProvider(self.base_dir)
@@ -504,23 +502,37 @@ class ParamsDagsterFactory(DagsterFactory):
                 continue
             
             content_hash = hashlib.md5(raw_content.encode()).hexdigest()
+            is_blueprint = config.get("blueprint", False)
             
-            # 🟢 Route 1: Blueprint Discovery (Logic Templates)
-            if config.get("blueprint", False):
-                blueprint_nm = config.get("name") or yaml_file.stem
+            # 🟢 Unified Definition Discovery
+            if is_blueprint:
+                # Route 1: Blueprint Discovery (Logic Templates)
+                job_names = [config.get("name") or yaml_file.stem]
+            else:
+                # Route 2: Static Pipeline Discovery (Concrete Jobs)
+                job_names = [j.get("name") for j in config.get("jobs", []) if j.get("name")]
+                if not job_names and "assets" in config:
+                    job_names = [f"{a['name']}_job" for a in config["assets"]]
+
+            for job_nm in job_names:
                 try:
+                    # Resolve Schema Shorthand
                     params_shorthand = config.get("params_schema")
+                    
+                    # Check nested jobs if not found at top level (common in multi-job or blueprint files)
                     if not params_shorthand and config.get("jobs"):
-                        # Try to find schema in the first job of the blueprint
-                        params_shorthand = config["jobs"][0].get("params_schema")
+                        # For blueprints or static multi-jobs, check if any job defines the schema
+                        for j in config["jobs"]:
+                            if j.get("name") == job_nm or is_blueprint:
+                                params_shorthand = j.get("params_schema")
+                                if params_shorthand: break
                     
                     params_schema = self._parse_shorthand(params_shorthand) if params_shorthand else None
-                    
-                    # Blueprints often have a primary asset or a list of assets
                     asset_selection = [a['name'] for a in config.get("assets", [])]
                     
-                    provider.upsert_blueprint(
-                        blueprint_nm=blueprint_nm,
+                    # 1. Upsert Unified Definition
+                    job_def_id = provider.upsert_job_definition(
+                        job_nm=job_nm,
                         yaml_def=config,
                         file_loc=str(yaml_file.relative_to(self.base_dir)),
                         file_hash=content_hash,
@@ -530,66 +542,25 @@ class ParamsDagsterFactory(DagsterFactory):
                         asset_selection=asset_selection,
                         team_nm=self.team_nm,
                         location_nm=self.location_name,
+                        blueprint_ind=is_blueprint,
                         by_nm="ParamsDagsterFactory.Sync"
                     )
-                except Exception as e:
-                    print(f"⚠️ Warning: Failed to sync blueprint {blueprint_nm}: {e}")
-                continue # Skip standard job sync for blueprints
-            
-            # 🟢 Route 2: Static Pipeline Discovery (Concrete Jobs)
-            jobs = config.get("jobs", [])
-            if not jobs and "assets" in config:
-                jobs = [{"name": f"{a['name']}_job", "selection": [a['name']]} for a in config["assets"]]
-            
-            for j_conf in jobs:
-                job_nm = j_conf.get("name")
-                if not job_nm: continue
-                
-                try:
-                    params_shorthand = j_conf.get("params_schema") or config.get("params_schema")
-                    params_schema = self._parse_shorthand(params_shorthand) if params_shorthand else None
-                    
-                    provider.upsert_job_definition(
-                        job_nm=job_nm,
-                        yaml_def=config,
-                        file_loc=str(yaml_file.relative_to(self.base_dir)),
-                        file_hash=content_hash,
-                        yaml_content=raw_content,
-                        description=j_conf.get("description") or config.get("description"),
-                        params_schema=params_schema,
-                        asset_selection=j_conf.get("selection"),
-                        team_nm=self.team_nm,
-                        location_nm=self.location_name,
-                        by_nm="ParamsDagsterFactory.Sync"
-                    )
-                except Exception as e:
-                    print(f"⚠️ Warning: Failed to sync definition for {job_nm}: {e}")
 
-    def _sync_params_schemas(self, all_configs: list):
-        """
-        Iterates through all configs and syncs job-level params_schema to the DB.
-        """
-        provider = JobParamsProvider(self.base_dir)
-        for item in all_configs:
-            config = item.get("config", {})
-            if "jobs" in config:
-                for j_conf in config["jobs"]:
-                    job_nm = j_conf.get("name")
-                    shorthand = j_conf.get("params_schema")
-                    if job_nm and shorthand:
-                        try:
-                            json_schema = self._parse_shorthand(shorthand)
-                            provider.upsert_params_schema(
-                                job_nm=job_nm,
-                                json_schema=json_schema,
-                                description=j_conf.get("description"),
-                                is_strict=j_conf.get("is_strict", False),
-                                team_nm=self.team_nm,
-                                location_nm=self.location_name,
-                                by_nm="ParamsDagsterFactory.Sync"
-                            )
-                        except Exception as e:
-                            print(f"⚠️ Warning: Failed to sync schema for job {job_nm}: {e}")
+                    # 2. 🟢 Explicit Schema Linking (The Holistic Fix)
+                    if params_schema:
+                        provider.upsert_params_schema_by_id(
+                            job_definition_id=job_def_id,
+                            json_schema=params_schema,
+                            description=config.get("description"),
+                            is_strict=config.get("is_strict", False),
+                            team_nm=self.team_nm,
+                            location_nm=self.location_name,
+                            by_nm="ParamsDagsterFactory.Sync"
+                        )
+
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to sync {job_nm}: {e}")
+
 
     def _parse_shorthand(self, shorthand: Dict[str, Any]) -> Dict[str, Any]:
         """
