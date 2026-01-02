@@ -1,11 +1,14 @@
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger, CHAR, UniqueConstraint, Date
+    Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger, CHAR, UniqueConstraint, Date, Sequence
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+# Shared sequence for all runnable pipeline entities (Static/Definition vs Instance)
+pipeline_id_seq = Sequence('etl_pipeline_id_seq', metadata=Base.metadata)
 
 class AuditMixin:
     """
@@ -126,7 +129,7 @@ class ETLJobDefinition(Base, AuditMixin):
     """
     __tablename__ = "etl_job_definition"
     
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, pipeline_id_seq, primary_key=True)
     job_nm = Column(String(255), nullable=False)
     description = Column(String(255))
     blueprint_ind = Column(Boolean, default=False, nullable=False) # True for Blueprints, False for Static
@@ -164,12 +167,12 @@ class ETLJobInstance(Base, AuditMixin):
     """
     __tablename__ = "etl_job_instance"
     
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, pipeline_id_seq, primary_key=True)
     instance_id = Column(String(255), nullable=False)
     description = Column(String(255))
     
     # Links
-    job_definition_id = Column(Integer, ForeignKey("etl_job_definition.id"), nullable=False)
+    job_definition_id = Column(BigInteger, ForeignKey("etl_job_definition.id"), nullable=False)
     schedule_id = Column(Integer, ForeignKey("etl_schedule.id"))
     
     # Overrides
@@ -203,7 +206,7 @@ class ETLJobParameter(Base, AuditMixin):
     __tablename__ = "etl_job_parameter"
     
     id = Column(Integer, primary_key=True)
-    job_definition_id = Column(Integer, ForeignKey("etl_job_definition.id"), unique=True)
+    job_definition_id = Column(BigInteger, ForeignKey("etl_job_definition.id"), unique=True)
     org_id = Column(Integer, ForeignKey("etl_org.id"))
     team_id = Column(Integer, ForeignKey("etl_team.id"))
     config_json = Column(JSONB, nullable=False, default={})
@@ -225,7 +228,7 @@ class ETLInstanceParameter(Base, AuditMixin):
     __tablename__ = "etl_instance_parameter"
     
     id = Column(Integer, primary_key=True)
-    instance_pk = Column(Integer, ForeignKey("etl_job_instance.id", ondelete="CASCADE"), unique=True)
+    instance_pk = Column(BigInteger, ForeignKey("etl_job_instance.id", ondelete="CASCADE"), unique=True)
     org_id = Column(Integer, ForeignKey("etl_org.id"))
     team_id = Column(Integer, ForeignKey("etl_team.id"))
     config_json = Column(JSONB, nullable=False, default={})
@@ -251,7 +254,7 @@ class ETLParamsSchema(Base, AuditMixin):
     __tablename__ = "etl_params_schema"
     
     id = Column(Integer, primary_key=True)
-    job_definition_id = Column(Integer, ForeignKey("etl_job_definition.id"), unique=True)
+    job_definition_id = Column(BigInteger, ForeignKey("etl_job_definition.id"), unique=True)
     org_id = Column(Integer, ForeignKey("etl_org.id"))
     team_id = Column(Integer, ForeignKey("etl_team.id"))
     code_location_id = Column(Integer, ForeignKey("etl_code_location.id"))

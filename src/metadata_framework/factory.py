@@ -507,7 +507,10 @@ class ParamsDagsterFactory(DagsterFactory):
             # 🟢 Unified Definition Discovery
             if is_blueprint:
                 # Route 1: Blueprint Discovery (Logic Templates)
-                job_names = [config.get("name") or yaml_file.stem]
+                # We prioritize actual job names from the 'jobs' block to ensure Dagster alignment.
+                job_names = [j.get("name") for j in config.get("jobs", []) if j.get("name")]
+                if not job_names:
+                    job_names = [config.get("name") or yaml_file.stem]
             else:
                 # Route 2: Static Pipeline Discovery (Concrete Jobs)
                 job_names = [j.get("name") for j in config.get("jobs", []) if j.get("name")]
