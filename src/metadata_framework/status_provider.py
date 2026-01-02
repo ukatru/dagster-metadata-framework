@@ -111,7 +111,17 @@ class NexusStatusProvider:
                 
         return org_id, team_id
 
-    def log_job_start(self, run_id: str, job_nm: str, instance_id: str, run_mode: str, org_code: Optional[str] = None, team_nm: Optional[str] = None, strt_dttm: Optional[datetime] = None) -> Optional[int]:
+    def log_job_start(
+        self, 
+        run_id: str, 
+        job_nm: str, 
+        instance_id: str, 
+        run_mode: str, 
+        org_code: Optional[str] = None,
+        team_nm: Optional[str] = None,
+        strt_dttm: Optional[datetime] = None,
+        log_url: Optional[str] = None
+    ) -> Optional[int]:
         """Atomic get-or-create for etl_job_status to handle race conditions."""
         def _execute():
             with self._session_scope() as session:
@@ -132,7 +142,8 @@ class NexusStatusProvider:
                         team_id=team_id,
                         run_mde_txt=run_mode,
                         btch_sts_cd='R',
-                        strt_dttm=actual_start
+                        strt_dttm=actual_start,
+                        log_url=log_url # Added log_url
                     )
                     session.add(status)
                     try:

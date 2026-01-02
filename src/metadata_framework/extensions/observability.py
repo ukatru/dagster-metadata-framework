@@ -1,3 +1,4 @@
+import os
 import functools
 import logging
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,17 @@ from metadata_framework.status_provider import NexusStatusProvider
 from datetime import datetime, timezone
 
 logger = logging.getLogger("nexus.observability")
+
+def create_run_url(run_id: str) -> str:
+    """Constructs the Dagster Run URL based on the environment."""
+    deployment = os.getenv("DAGSTER_CLOUD_DEPLOYMENT_NAME")
+    org_domain = os.getenv("DAGSTER_CLOUD_ORGANIZATION")
+    
+    if deployment and org_domain:
+        return f"https://{org_domain}.dagster.cloud/{deployment}/runs/{run_id}"
+    
+    # Fallback to local
+    return f"http://localhost:3000/runs/{run_id}"
 
 def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bool = False) -> List[Any]:
     """
@@ -45,9 +57,21 @@ def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bo
         stats = context.instance.get_run_stats(run.run_id)
         strt_dttm = datetime.fromtimestamp(stats.start_time, tz=timezone.utc).replace(tzinfo=None) if stats.start_time else None
         
+        # 🌐 Construct Dagster Run URL
+        log_url = create_run_url(run.run_id)
+
         context.log.info(f"Nexus Observability: Logging START for job={job_nm}, run_id={run.run_id}")
         try:
-            provider.log_job_start(run.run_id, job_nm, instance_id, run_mode, org_code=org_code, team_nm=team_nm, strt_dttm=strt_dttm)
+            provider.log_job_start(
+                run.run_id, 
+                job_nm, 
+                instance_id, 
+                run_mode, 
+                org_code=org_code, 
+                team_nm=team_nm, 
+                strt_dttm=strt_dttm,
+                log_url=log_url
+            )
         except Exception as e:
             context.log.error(f"❌ Nexus Observability: Failed to log job start: {e}")
 

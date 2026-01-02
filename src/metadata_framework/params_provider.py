@@ -27,6 +27,63 @@ class JobParamsProvider:
             raise ValueError("POSTGRES_PASSWORD is not set in environment")
         return psycopg2.connect(**self.db_params)
 
+    def get_hierarchical_vars(
+        self, 
+        team_nm: Optional[str] = None,
+        org_code: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Fetches variables from hierarchical tables.
+        Priority: Org-specific -> Team-specific.
+        Strictly isolated to tenant for SaaS privacy.
+        """
+        vars = {}
+        if not (team_nm or org_code):
+            return vars
+
+        conn = self._get_connection()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                # 1. Resolve Org and Team IDs efficiently
+                org_id, team_id = None, None
+                
+                if team_nm:
+                    # Team name is highly specific, resolves both IDs
+                    cur.execute("SELECT id, org_id FROM etl_team WHERE team_nm = %s", (team_nm,))
+                    row = cur.fetchone()
+                    if row:
+                        team_id, org_id = row['id'], row['org_id']
+                
+                if org_code and not org_id:
+                    # Fallback to org resolution if team was missing or didn't resolve org
+                    cur.execute("SELECT id FROM etl_org WHERE org_code = %s", (org_code,))
+                    row = cur.fetchone()
+                    if row: org_id = row['id']
+
+                if not org_id:
+                    return vars
+
+                # 2. Optimized Consolidated Query
+                # Tier 1: Org (Lower priority)
+                # Tier 2: Team (Higher priority, overwrites Org)
+                sql = "SELECT var_nm, var_value, 1 as tier FROM etl_global_variables WHERE org_id = %s"
+                q_params = [org_id]
+                
+                if team_id:
+                    sql += " UNION ALL SELECT var_nm, var_value, 2 as tier FROM etl_team_variables WHERE team_id = %s"
+                    q_params.append(team_id)
+                
+                # Order by tier so Team (2) overwrites Org (1) when iterating the result set
+                sql += " ORDER BY tier ASC"
+                
+                cur.execute(sql, tuple(q_params))
+                for row in cur.fetchall():
+                    vars[row['var_nm']] = row['var_value']
+
+        finally:
+            conn.close()
+        return vars
+
     def get_job_params(
         self, 
         job_nm: str, 

@@ -61,9 +61,30 @@ class ParamsAssetFactory(AssetFactory):
         
         if instance_id or platform_type == "static":
             team_nm = run_tags.get("team")
+            org_code = run_tags.get("org")
+            
             provider = JobParamsProvider(self.base_dir)
             
-            # Use unified hydration logic in provider
+            # 🟢 Tier 1: Hierarchical Variables (Global -> Team)
+            # These populate the 'vars' object and os.environ
+            db_vars = provider.get_hierarchical_vars(team_nm=team_nm, org_code=org_code)
+            if db_vars:
+                # Update Jinja 'vars' (Takes priority over local YAML vars)
+                if "vars" not in template_vars:
+                    from dagster_dag_factory.factory.helpers.dynamic import Dynamic
+                    template_vars["vars"] = Dynamic({})
+                
+                # Merge DB vars into the Dynamic vars object
+                for k, v in db_vars.items():
+                    template_vars["vars"][k] = v
+                    # Also inject into os.environ for connection/resource usage
+                    if v is not None:
+                        os.environ[k] = str(v)
+                
+                context.log.info(f"✅ Successfully hydrated {len(db_vars)} hierarchical variables from DB (Overriding local YAML)")
+
+            # 🟢 Tier 2: Job Parameters (1:1 or 1:N Overrides)
+            # These populate the 'params' object
             db_params = provider.get_job_params(
                 job_nm=job_nm, 
                 instance_id=instance_id, 

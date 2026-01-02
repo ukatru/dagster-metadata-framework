@@ -246,6 +246,48 @@ class ETLParameter(Base, AuditMixin):
     parm_value = Column(Text)
     # Removing legacy created_at in favor of AuditMixin
 
+class ETLGlobalVariable(Base, AuditMixin):
+    """
+    Global/Org-level variables.
+    Scoped to an Organization but shared across all teams.
+    """
+    __tablename__ = "etl_global_variables"
+    
+    id = Column(Integer, primary_key=True)
+    org_id = Column(Integer, ForeignKey("etl_org.id"), nullable=True) # Global if null, or Org-specific
+    var_nm = Column(String(255), nullable=False)
+    var_value = Column(Text)
+    description = Column(String(255))
+    
+    # Relationships
+    org = relationship("ETLOrg")
+    
+    __table_args__ = (
+        UniqueConstraint("org_id", "var_nm", name="uq_org_variable"),
+    )
+
+class ETLTeamVariable(Base, AuditMixin):
+    """
+    Team-level variables.
+    Scoped to a specific team.
+    """
+    __tablename__ = "etl_team_variables"
+    
+    id = Column(Integer, primary_key=True)
+    org_id = Column(Integer, ForeignKey("etl_org.id"), nullable=True)
+    team_id = Column(Integer, ForeignKey("etl_team.id"), nullable=False)
+    var_nm = Column(String(255), nullable=False)
+    var_value = Column(Text)
+    description = Column(String(255))
+    
+    # Relationships
+    org = relationship("ETLOrg")
+    team = relationship("ETLTeam")
+    
+    __table_args__ = (
+        UniqueConstraint("team_id", "var_nm", name="uq_team_variable"),
+    )
+
 class ETLParamsSchema(Base, AuditMixin):
     """
     Developer Contract Table.
@@ -293,6 +335,7 @@ class ETLJobStatus(Base, AuditMixin):
     end_dttm = Column(DateTime)
     btch_sts_cd = Column(CHAR(1), default='R') # R, C, A
     run_mde_txt = Column(String(50), nullable=False) # SCHEDULED, MANUAL, BACKFILL
+    log_url = Column(Text)
     
     # Relationships
     org = relationship("ETLOrg", back_populates="job_statuses")
