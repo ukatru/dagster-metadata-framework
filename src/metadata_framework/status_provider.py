@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 
-from metadata_framework.models import ETLJobStatus, ETLAssetStatus
+from metadata_framework.models import ETLJobStatus, ETLAssetStatus, ETLOrg, ETLTeam
 
 from dotenv import load_dotenv
 
@@ -86,11 +86,39 @@ class NexusStatusProvider:
                 logger.info(f"Nexus DB Busy. Retrying in {delay}s... (Attempt {attempt + 1})")
                 time.sleep(delay)
 
-    def log_job_start(self, run_id: str, job_nm: str, instance_id: str, run_mode: str, strt_dttm: Optional[datetime] = None) -> Optional[int]:
+    def _resolve_tenant(self, session, org_code: Optional[str] = None, team_nm: Optional[str] = None):
+        """Resolves alphanumeric codes/names to integer IDs for database storage."""
+        org_id, team_id = None, None
+        
+        if org_code:
+            org = session.query(ETLOrg).filter(ETLOrg.org_code == org_code).first()
+            if org:
+                org_id = org.id
+                
+        if team_nm and org_id:
+            team = session.query(ETLTeam).filter(
+                ETLTeam.team_nm == team_nm, 
+                ETLTeam.org_id == org_id
+            ).first()
+            if team:
+                team_id = team.id
+        elif team_nm:
+            # Fallback if org is missing but team is unique
+            team = session.query(ETLTeam).filter(ETLTeam.team_nm == team_nm).first()
+            if team:
+                team_id = team.id
+                org_id = team.org_id
+                
+        return org_id, team_id
+
+    def log_job_start(self, run_id: str, job_nm: str, instance_id: str, run_mode: str, org_code: Optional[str] = None, team_nm: Optional[str] = None, strt_dttm: Optional[datetime] = None) -> Optional[int]:
         """Atomic get-or-create for etl_job_status to handle race conditions."""
         def _execute():
             with self._session_scope() as session:
                 actual_start = strt_dttm or datetime.now(timezone.utc).replace(tzinfo=None)
+                
+                # Resolve IDs
+                org_id, team_id = self._resolve_tenant(session, org_code, team_nm)
                 
                 # 1. Atomic Check & Create
                 status = session.query(ETLJobStatus).filter_by(run_id=run_id).first()
@@ -100,6 +128,8 @@ class NexusStatusProvider:
                         run_id=run_id,
                         job_nm=job_nm,
                         instance_id=instance_id,
+                        org_id=org_id,
+                        team_id=team_id,
                         run_mde_txt=run_mode,
                         btch_sts_cd='R',
                         strt_dttm=actual_start
@@ -116,6 +146,8 @@ class NexusStatusProvider:
                     status.job_nm = job_nm
                     status.instance_id = instance_id
                     status.run_mde_txt = run_mode
+                    if org_id: status.org_id = org_id
+                    if team_id: status.team_id = team_id
                 # 🟢 Update start time if official sensor provides an earlier/more accurate one
                 btch_nbr = status.btch_nbr if status else None
                 logger.info(f"✅ Nexus (log_job_start): Recorded run_id={run_id}, job={job_nm}, btch_nbr={btch_nbr}")
@@ -167,15 +199,24 @@ class NexusStatusProvider:
                     
                     resolved_job_nm = job_nm or "UNKNOWN"
                     resolved_instance_id = "UNKNOWN"
+                    resolved_org_code = None
+                    resolved_team_nm = None
                     
                     if config_json and "template_vars" in config_json:
                         tags = config_json["template_vars"].get("run_tags", {})
                         resolved_instance_id = tags.get("instance_id", "UNKNOWN")
+                        resolved_org_code = tags.get("org")
+                        resolved_team_nm = tags.get("team")
                     
+                    # Resolve IDs for the stub record
+                    org_id, team_id = self._resolve_tenant(session, resolved_org_code, resolved_team_nm)
+
                     job_status = ETLJobStatus(
                         run_id=run_id,
                         job_nm=resolved_job_nm,
                         instance_id=resolved_instance_id,
+                        org_id=org_id,
+                        team_id=team_id,
                         run_mde_txt='MANUAL', # Default to manual, sensor will update
                         btch_sts_cd='R',
                         strt_dttm=datetime.now(timezone.utc).replace(tzinfo=None)
@@ -188,11 +229,17 @@ class NexusStatusProvider:
                         job_status.job_nm = job_nm
                     
                     # Try to resolve instance_id if it's still UNKNOWN
-                    if job_status.instance_id == "UNKNOWN" and config_json:
+                    if config_json:
                         tags = config_json.get("template_vars", {}).get("run_tags", {})
+                        
                         found_id = tags.get("instance_id")
-                        if found_id:
+                        if found_id and job_status.instance_id == "UNKNOWN":
                             job_status.instance_id = found_id
+                        
+                        # Also sync org/team if they are missing in the parent
+                        org_id, team_id = self._resolve_tenant(session, tags.get("org"), tags.get("team"))
+                        if org_id and not job_status.org_id: job_status.org_id = org_id
+                        if team_id and not job_status.team_id: job_status.team_id = team_id
                 
                 asset_status = ETLAssetStatus(
                     btch_nbr=job_status.btch_nbr,

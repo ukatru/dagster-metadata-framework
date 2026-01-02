@@ -21,7 +21,7 @@ def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bo
         location_name: Optional prefix for sensor names to avoid collisions in Cloud.
         global_monitor: If True, uses 'monitor_all_code_locations' to track all runs in the workspace.
     """
-    prefix = f"{location_name}_" if location_name else ""
+    prefix = f"{location_name.replace('-', '_')}_" if location_name else ""
     
     # 🟢 1. Job Started Sensor
     @run_status_sensor(
@@ -36,6 +36,8 @@ def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bo
         tags = run.tags if hasattr(run, "tags") else {}
         instance_id = tags.get("instance_id", "MANUAL")
         job_nm = tags.get("job_nm") or run.job_name or "UNKNOWN_JOB"
+        org_code = tags.get("org")
+        team_nm = tags.get("team")
         
         is_scheduled = any(k.startswith("dagster/schedule") for k in tags.keys())
         run_mode = "SCHEDULED" if is_scheduled else "MANUAL"
@@ -45,7 +47,7 @@ def make_nexus_listeners(location_name: Optional[str] = None, global_monitor: bo
         
         context.log.info(f"Nexus Observability: Logging START for job={job_nm}, run_id={run.run_id}")
         try:
-            provider.log_job_start(run.run_id, job_nm, instance_id, run_mode, strt_dttm=strt_dttm)
+            provider.log_job_start(run.run_id, job_nm, instance_id, run_mode, org_code=org_code, team_nm=team_nm, strt_dttm=strt_dttm)
         except Exception as e:
             context.log.error(f"❌ Nexus Observability: Failed to log job start: {e}")
 
@@ -164,6 +166,14 @@ class NexusObservability:
                 for k in ["vars", "run_tags", "params", "partition_key", "trigger"]:
                     if k in template_vars:
                         pruned_tpl_vars[k] = to_json_serializable(template_vars[k])
+            
+            # Ensure critical tags for tenant isolation are present
+            if "run_tags" not in pruned_tpl_vars:
+                pruned_tpl_vars["run_tags"] = {}
+            
+            for tag_key in ["org", "team", "instance_id"]:
+                if tag_key not in pruned_tpl_vars["run_tags"] and tags.get(tag_key):
+                    pruned_tpl_vars["run_tags"][tag_key] = tags[tag_key]
 
             full_config = {
                 "source": to_json_serializable(source_config),
