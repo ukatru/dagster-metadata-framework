@@ -371,18 +371,15 @@ class ParamsDagsterFactory(DagsterFactory):
                     matched = (asset_to_jobs.get(a_nm, set()) | jobs_targeting_all) & managed_job_names
                     if matched:
                         override = overridden_jobs[sorted(list(matched))[0]]
-                        a_conf.pop("cron", None)
-                        if "partitions_def" in a_conf:
-                            self._patch_partitions(a_conf["partitions_def"], override)
+                        # No longer popping 'cron' or patching partitions.
+                        # The ScheduleFactory now respects cron_schedule overrides directly.
 
             if "jobs" in config:
                 for j_conf in config["jobs"]:
                     if j_conf.get("name") in managed_job_names:
                         # Priority 1: 1:1 Override (if it exists)
                         override = overridden_jobs.get(j_conf["name"])
-                        j_conf.pop("cron", None)
-                        if override and "partitions_def" in j_conf:
-                            self._patch_partitions(j_conf["partitions_def"], override)
+                        # No longer popping 'cron' or patching partitions.
 
             # Suppress Legacy Triggers
             if "schedules" in config:
@@ -421,22 +418,6 @@ class ParamsDagsterFactory(DagsterFactory):
 
         return all_configs
 
-    def _patch_partitions(self, p_conf: dict, override: dict):
-        cron_str = override.get("cron_schedule")
-        start_date = override.get("partition_start_dt")
-        
-        if start_date:
-            p_conf["start_date"] = start_date.isoformat()
-            
-        if cron_str:
-            parts = cron_str.split()
-            if len(parts) >= 2:
-                try:
-                    p_conf["minute_offset"] = int(parts[0])
-                    p_conf["hour_offset"] = int(parts[1])
-                except (ValueError, IndexError): pass
-            if p_conf.get("type") == "cron":
-                p_conf["cron_schedule"] = cron_str
 
     def _enrich_configs(self, all_configs: List[Dict[str, Any]]):
         """
