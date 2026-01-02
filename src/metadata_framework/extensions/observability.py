@@ -216,6 +216,9 @@ class NexusObservability:
             # Start timing
             start_time = datetime.now(timezone.utc).replace(tzinfo=None)
             
+            # 🌐 Construct Dagster Run URL
+            log_url = create_run_url(run_id)
+
             self.provider.log_asset_start(
                 run_id=run_id,
                 asset_nm=asset_nm,
@@ -223,7 +226,8 @@ class NexusObservability:
                 parent_assets=upstreams,
                 partition_key=context.partition_key if hasattr(context, "has_partition_key") and context.has_partition_key else None,
                 strt_dttm=start_time,
-                job_nm=logical_job_nm
+                job_nm=logical_job_nm,
+                log_url=log_url
             )
             
             try:

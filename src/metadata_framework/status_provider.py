@@ -189,7 +189,8 @@ class NexusStatusProvider:
         partition_key: Optional[str] = None,
         event_type: str = "Materialization",
         strt_dttm: Optional[datetime] = None,
-        job_nm: Optional[str] = None
+        job_nm: Optional[str] = None,
+        log_url: Optional[str] = None
     ) -> Optional[int]:
         """Creates a child record in etl_asset_status."""
         def _execute():
@@ -230,7 +231,8 @@ class NexusStatusProvider:
                         team_id=team_id,
                         run_mde_txt='MANUAL', # Default to manual, sensor will update
                         btch_sts_cd='R',
-                        strt_dttm=datetime.now(timezone.utc).replace(tzinfo=None)
+                        strt_dttm=datetime.now(timezone.utc).replace(tzinfo=None),
+                        log_url=log_url
                     )
                     session.add(job_status)
                     session.flush() # Get the btch_nbr (id)
