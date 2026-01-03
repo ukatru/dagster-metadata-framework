@@ -5,12 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dagster-metadata-framework"
 version = "0.0.1"
-description = "Metadata-driven runtime extension for dagster-dag-factory"
+description = "Parameters-driven runtime extension for dagster-dag-factory"
 dependencies = [
     "dagster==1.11.1",
     "psycopg2-binary>=2.9.0",
     "python-dotenv>=1.0.0",
-    # We expect dagster-dag-factory to be installed as an editable or in path
+    "alembic>=1.11.0",
+    "sqlalchemy>=2.0.0",
+    "dagster-dag-factory",
 ]
 
 [tool.setuptools.packages.find]
