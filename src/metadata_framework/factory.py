@@ -2,6 +2,7 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 import yaml
 import os
+from dagster_dag_factory.factory.helpers.dynamic import Dynamic
 from dagster_dag_factory.factory.asset_factory import AssetFactory
 from dagster_dag_factory.factory.dagster_factory import DagsterFactory
 from .params_provider import JobParamsProvider
@@ -68,20 +69,22 @@ class ParamsAssetFactory(AssetFactory):
             # 🟢 Tier 1: Hierarchical Variables (Global -> Team)
             # These populate the 'vars' object and os.environ
             db_vars = provider.get_hierarchical_vars(team_nm=team_nm, org_code=org_code)
+
             if db_vars:
                 # Update Jinja 'vars' (Takes priority over local YAML vars)
                 if "vars" not in template_vars:
-                    from dagster_dag_factory.factory.helpers.dynamic import Dynamic
                     template_vars["vars"] = Dynamic({})
                 
-                # Merge DB vars into the Dynamic vars object
-                for k, v in db_vars.items():
-                    template_vars["vars"][k] = v
-                    # Also inject into os.environ for connection/resource usage
-                    if v is not None:
-                        os.environ[k] = str(v)
-                
                 context.log.info(f"✅ Successfully hydrated {len(db_vars)} hierarchical variables from DB (Overriding local YAML)")
+                # Merge DB vars into the Dynamic vars object
+                for attr, value in db_vars.items():
+                    setattr(template_vars["vars"], attr, value)
+                    if value is not None:
+                        os.environ[attr] = str(value)
+                
+                context.log.info(f"template_vars: {template_vars}")
+                context.log.info(f"✅ Successfully hydrated {len(db_vars)} hierarchical variables from DB (Overriding local YAML)")
+                context.log.info(f"os.environ: {os.environ}")
 
             # 🟢 Tier 2: Job Parameters (1:1 or 1:N Overrides)
             # These populate the 'params' object

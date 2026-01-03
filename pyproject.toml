@@ -15,6 +15,9 @@ dependencies = [
     "dagster-dag-factory",
 ]
 
+[project.scripts]
+metadata-framework = "metadata_framework.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

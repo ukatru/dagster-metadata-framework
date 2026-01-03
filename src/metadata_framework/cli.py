@@ -23,7 +23,7 @@ def export_schema(output_path: str):
         
     print(f"✅ Nexus Schema exported to: {output_file}")
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Nexus Platform CLI")
     parser.add_argument("--export-schema", type=str, help="Path to save the JSON schema file")
     
@@ -33,3 +33,6 @@ if __name__ == "__main__":
         export_schema(args.export_schema)
     else:
         parser.print_help()
+
+if __name__ == "__main__":
+    main()
